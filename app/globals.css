@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --background: #090d0b;
+  --foreground: #eef2ed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+::selection {
+  background: rgba(184, 243, 107, 0.28);
+  color: #f5f8f4;
+}
+
+* {
+  scrollbar-color: #344238 #0b100e;
+  scrollbar-width: thin;
+}
