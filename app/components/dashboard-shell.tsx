@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Activity,
   Bell,
   ChevronRight,
   Dumbbell,
@@ -12,6 +11,7 @@ import {
   Utensils,
   type LucideIcon,
 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
@@ -35,9 +35,13 @@ const navigation: NavigationItem[] = [
 function Brand() {
   return (
     <Link className="flex items-center gap-3" href="/" aria-label="MySynonym home">
-      <span className="flex size-9 items-center justify-center rounded-xl bg-[#b8f36b] text-[#102010]">
-        <Activity size={19} strokeWidth={2.5} />
-      </span>
+      <Image
+        alt=""
+        className="size-9 shrink-0 rounded-xl object-cover"
+        height={36}
+        src="/mysynonym-icon.png"
+        width={36}
+      />
       <span className="text-[17px] font-semibold tracking-[-0.02em] text-white">
         my<span className="text-[#b8f36b]">synonym</span>
       </span>

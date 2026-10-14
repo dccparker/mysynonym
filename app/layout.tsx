@@ -16,6 +16,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "MySynonym | Athlete Dashboard",
   description: "Your training, recovery, and fueling in one place.",
+  icons: {
+    icon: "/mysynonym-icon.png",
+    apple: "/mysynonym-icon.png",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
