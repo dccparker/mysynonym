@@ -1,14 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, CalendarDays, Clock3, Utensils, Waves, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  ArrowRight,
+  Bike,
+  CalendarDays,
+  Clock3,
+  Dumbbell,
+  Footprints,
+  X,
+  Utensils,
+  Waves,
+  Zap,
+} from "lucide-react";
 import Link from "next/link";
 import {
   useAthleteProfile,
   weekDays,
   type AthleteProfile,
 } from "../lib/athlete-profile";
-import { WORKOUTS_UPDATED_EVENT, WORKOUT_STORAGE_KEY } from "../lib/workout-storage";
+import {
+  completePlannedSession,
+  updatePlannedSession,
+  WORKOUTS_UPDATED_EVENT,
+  WORKOUT_STORAGE_KEY,
+  type CompletedSessionChanges,
+} from "../lib/workout-storage";
 import {
   matchPlannedSessions,
   normalizeTrainingPlan,
@@ -17,8 +34,16 @@ import {
   TRAINING_PLAN_UPDATED_EVENT,
   type CompletedSession,
   type PlannedActivity,
+  type PlannedActivityType,
+  type PlannedIntensity,
   type PlannedSession,
 } from "../lib/training-plan";
+import {
+  localRecoveryDate,
+  readRecoveryCheckIns,
+  RECOVERY_CHECKINS_UPDATED_EVENT,
+  type RecoveryCheckIn,
+} from "../lib/recovery-checkin";
 
 type Workout = {
   id: string;
@@ -43,9 +68,32 @@ type Recommendation = {
   reasoning: string[];
   activities?: PlannedActivity[];
   plannerBased?: boolean;
+  plannedSessionId?: string;
   instructions?: string;
   purpose?: string;
+  recoveryAdjustment?: string;
 };
+
+type ActivityEdit = {
+  id: string;
+  activityType: PlannedActivityType;
+  durationMinutes: string;
+  distance: string;
+  intensity: PlannedIntensity;
+  instructions: string;
+  purpose: string;
+};
+
+type SessionStatistics = {
+  averageHeartRate: string;
+  maximumHeartRate: string;
+  averagePace: string;
+  averagePower: string;
+  calories: string;
+};
+
+const activityOptions: PlannedActivityType[] = ["Run", "Ride", "Swim", "Strength", "Other"];
+const intensityOptions: PlannedIntensity[] = ["Recovery", "Easy", "Moderate", "Hard", "Rest"];
 
 function localDateString(date: Date): string {
   const year = date.getFullYear();
@@ -64,6 +112,37 @@ function goalLabel(profile: AthleteProfile): string {
   return profile.primaryGoal === "Custom"
     ? profile.customGoalName || "Custom goal"
     : profile.primaryGoal || "Goal not set";
+}
+
+function effortExplanation(intensity: PlannedIntensity): string {
+  if (intensity === "Recovery") return "Very light movement. Finish feeling comfortable.";
+  if (intensity === "Easy") return "Comfortable effort; you should be able to speak in complete sentences.";
+  if (intensity === "Moderate") return "Steady, controlled effort. You can speak in short sentences.";
+  if (intensity === "Hard") return "Challenging but controlled. Ease off if you cannot maintain good form.";
+  return "Rest or very light movement.";
+}
+
+function activityDistanceUnit(activityType: PlannedActivityType, profile: AthleteProfile): string {
+  if (activityType === "Swim") return profile.units === "Imperial" ? "yd" : "m";
+  return profile.units === "Imperial" ? "mi" : "km";
+}
+
+function activityIcon(activityType: PlannedActivityType) {
+  if (activityType === "Run") return Footprints;
+  if (activityType === "Ride") return Bike;
+  if (activityType === "Swim") return Waves;
+  if (activityType === "Strength") return Dumbbell;
+  return Zap;
+}
+
+function workoutTimeSegments(duration: number) {
+  const warmup = duration >= 20 ? 5 : duration >= 10 ? 2 : 0;
+  const cooldown = warmup;
+  return {
+    warmup,
+    main: Math.max(0, duration - warmup - cooldown),
+    cooldown,
+  };
 }
 
 function formatWorkoutDate(date: string): string {
@@ -149,6 +228,7 @@ function buildRecommendation(
   workouts: Workout[],
   plannedWorkouts: PlannedSession[],
   today: Date,
+  recovery?: RecoveryCheckIn,
 ): Recommendation {
   const currentDay = weekDays[(today.getDay() + 6) % 7];
   const weekStart = localDateString(startOfWeek(today));
@@ -302,30 +382,135 @@ function buildRecommendation(
     );
   }
 
-  if (selectedPlan) {
-    const totalMinutes = plannedSessionDuration(selectedPlan);
-    const isRescheduled = selectedPlan.id === rescheduledPlan?.id;
-    const allInstructions = selectedPlan.activities.map((activity) => activity.instructions).filter(Boolean);
-    const allPurposes = selectedPlan.activities.map((activity) => activity.purpose).filter(Boolean);
+  const recoveryConcerns = recovery
+    ? [
+        ...(recovery.energy <= 2 ? ["low energy"] : []),
+        ...(recovery.soreness >= 4 ? ["high soreness"] : []),
+        ...(recovery.stress >= 4 ? ["high stress"] : []),
+        ...(recovery.motivation <= 2 ? ["low motivation"] : []),
+        ...(recovery.sleepQuality <= 2 ? ["poor sleep quality"] : []),
+        ...(recovery.sleepDurationHours !== undefined && recovery.sleepDurationHours < 6
+          ? ["short sleep duration"]
+          : []),
+      ]
+    : [];
+  const recoveryPriority = recoveryConcerns.length >= 3 || Boolean(recovery?.painNotes?.trim());
+  const recoveryConcern = recoveryConcerns.length > 0 || Boolean(recovery?.painNotes?.trim());
+  const timeLimited =
+    Boolean(
+      recovery &&
+        selectedPlan &&
+        recovery.availableTrainingMinutes !== undefined &&
+        recovery.availableTrainingMinutes < plannedSessionDuration(selectedPlan),
+    );
+  const needsRecoveryAdjustment = recoveryConcern || timeLimited;
+  const recoveryExplanation = !recovery
+    ? "No recovery check-in was available for this recommendation."
+    : recoveryConcern
+      ? `Today's workout was reduced because your check-in reported ${[
+          ...recoveryConcerns,
+          ...(recovery.painNotes?.trim() ? ["pain or a limitation"] : []),
+        ].join(" and ")}.${timeLimited ? ` It was also shortened to fit the ${recovery.availableTrainingMinutes}-minute training time you entered.` : ""}`
+      : timeLimited
+        ? `Today's workout was shortened to fit the ${recovery.availableTrainingMinutes}-minute training time you entered. Your saved weekly plan has not been changed.`
+      : "Your planned workout remains appropriate based on today's check-in.";
+  const recoveryReasoning = [
+    recoveryExplanation,
+    ...(recovery
+      ? [
+          `Estimated readiness from the check-in is ${recovery.readinessCategory} (${recovery.readinessScore}/100); energy ${recovery.energy}/5, soreness ${recovery.soreness}/5, stress ${recovery.stress}/5, motivation ${recovery.motivation}/5, and sleep quality ${recovery.sleepQuality}/5.`,
+        ]
+      : []),
+  ];
+
+  if (recovery?.availableTrainingMinutes === 0) {
     return {
-      title: `${isRescheduled ? "Rescheduled: " : ""}${selectedPlan.title}`,
-      duration: `${totalMinutes} minutes`,
-      why: isRescheduled
-        ? `This ${selectedPlan.activities.map((activity) => activity.activityType).join(" and ")} session was planned for ${selectedPlan.day} and remains unmatched to a completed training session. Rescheduling it is the next plan-aligned option.`
-        : "This session was saved in your Training Planner for today.",
-      nutrition: "Eat your usual meals, include familiar carbohydrate and protein sources, and drink to thirst.",
-      recovery: "Keep to the planned intensity. Recovery, sleep, and sensor data were not used unless entered separately.",
+      title: "Rest day",
+      duration: "No training time available",
+      why: selectedPlan
+        ? "No training time was available in today's check-in. The workout remains in your saved weekly plan and can be moved or adjusted there."
+        : "No training time was available in today's check-in. Keep today free of planned training.",
+      nutrition: "Follow your usual meals and drink to thirst.",
+      recovery: "Keep today free of planned training.",
       confidence: 92,
       plannerBased: true,
-      activities: selectedPlan.activities,
-      instructions: allInstructions.join(" "),
-      purpose: allPurposes.join(" "),
+      recoveryAdjustment: "No training time was available in today's check-in; the saved plan remains unchanged.",
       reasoning: [
         ...profileData,
         ...historyReasoning,
         ...plannerReasoning,
+        ...recoveryReasoning,
+        ...(selectedPlan
+          ? ["Today's planned workout remains unchanged in the Weekly Training Planner."]
+          : []),
+      ],
+    };
+  }
+
+  if (selectedPlan) {
+    const activities = needsRecoveryAdjustment
+      ? selectedPlan.activities.map((activity) => ({
+          ...activity,
+          durationMinutes: Math.max(
+            1,
+            Math.floor(
+              activity.durationMinutes *
+                Math.min(
+                  recoveryPriority
+                    ? 0.6
+                    : recoveryConcern
+                      ? 0.8
+                      : 1,
+                  timeLimited && recovery?.availableTrainingMinutes !== undefined
+                    ? recovery.availableTrainingMinutes /
+                        Math.max(plannedSessionDuration(selectedPlan), 1)
+                    : 1,
+                ),
+            ),
+          ),
+          intensity: recoveryPriority
+            ? "Recovery" as const
+            : recoveryConcern
+              ? activity.intensity === "Hard"
+                ? "Moderate" as const
+                : "Easy" as const
+              : activity.intensity,
+          instructions: `${activity.instructions} ${recoveryPriority ? "Use this shorter, very light recovery option today." : recoveryConcern ? "Use this shorter, easier version today." : "Shorten today's version to fit the time you have available."} The saved weekly plan itself has not been changed.`,
+        }))
+      : selectedPlan.activities;
+    const totalMinutes = activities.reduce((sum, activity) => sum + activity.durationMinutes, 0);
+    const isRescheduled = selectedPlan.id === rescheduledPlan?.id;
+    const allInstructions = activities.map((activity) => activity.instructions).filter(Boolean);
+    const allPurposes = activities.map((activity) => activity.purpose).filter(Boolean);
+    return {
+      title: `${needsRecoveryAdjustment ? (recoveryPriority ? "Recovery option: " : "Adjusted: ") : isRescheduled ? "Rescheduled: " : ""}${selectedPlan.title}`,
+      duration: `${totalMinutes} minutes`,
+      why: `${isRescheduled
+        ? `Why this workout: ${selectedPlan.reason || `It supports your ${goalLabel(profile)} goal.`} This session was originally planned for ${selectedPlan.day} and remains unmatched to a completed training session.`
+        : `Why this workout: ${selectedPlan.reason || `It supports your ${goalLabel(profile)} goal and follows your weekly plan.`}${selectedPlan.rescheduledFromDay ? ` This workout was moved from ${selectedPlan.rescheduledFromDay} to ${selectedPlan.day}.` : ""}`} ${recoveryExplanation}${recovery?.painNotes?.trim() ? " Consider reducing training and seeking qualified professional advice if the issue is significant or persistent." : ""}`,
+      nutrition: "Eat your usual meals, include familiar carbohydrate and protein sources, and drink to thirst.",
+      recovery: needsRecoveryAdjustment
+        ? "The adjusted suggestion lowers today's duration and effort. Your saved workout remains unchanged; use Completed With Changes to record what you actually did."
+        : "Keep to the planned intensity. Recovery metrics are considered only when provided in your check-in.",
+      confidence: 92,
+      plannerBased: true,
+      ...(pendingTodayPlan?.id === selectedPlan.id
+        ? { plannedSessionId: selectedPlan.id }
+        : {}),
+      activities,
+      instructions: allInstructions.join(" "),
+      purpose: allPurposes.join(" "),
+      recoveryAdjustment: recoveryExplanation,
+      reasoning: [
+        ...profileData,
+        ...historyReasoning,
+        ...plannerReasoning,
+        ...recoveryReasoning,
         `Selected ${selectedPlan.title} from the Training Planner${isRescheduled ? `, originally planned for ${selectedPlan.day} (${selectedPlan.date})` : " for today"}.`,
-        `Session contains ${selectedPlan.activities.map((activity) => `${activity.activityType} for ${activity.durationMinutes} minutes at ${activity.intensity.toLowerCase()} effort`).join("; ")}.`,
+        ...(selectedPlan.rescheduledFromDay
+          ? [`This workout was moved from ${selectedPlan.rescheduledFromDay} to ${selectedPlan.day}.`]
+          : []),
+        `Session contains ${activities.map((activity) => `${activity.activityType} for ${activity.durationMinutes} minutes at ${activity.intensity.toLowerCase()} effort`).join("; ")}.`,
         `Why it fits the goal: ${allPurposes.join(" ") || `It was planned to support ${goalLabel(profile)}.`}`,
       ],
     };
@@ -340,10 +525,12 @@ function buildRecommendation(
       recovery: "Use the day for rest or comfortable everyday movement. No readiness or sensor data was used.",
       confidence: 90,
       plannerBased: true,
+      recoveryAdjustment: recoveryExplanation,
       reasoning: [
         ...profileData,
         ...historyReasoning,
         ...plannerReasoning,
+        ...recoveryReasoning,
         `The generated week has no remaining session scheduled for ${currentDay}.`,
       ],
     };
@@ -362,6 +549,11 @@ function buildRecommendation(
   if (lastWorkoutAgeDays === 0) {
     recoveryReasons.push("the latest completed workout was today");
   }
+  if (recoveryPriority) {
+    recoveryReasons.push("today's recovery check-in indicates several recovery concerns");
+  } else if (needsRecoveryAdjustment) {
+    recoveryReasons.push("today's recovery check-in indicates reduced readiness");
+  }
 
   if (recoveryReasons.length > 0) {
     return {
@@ -371,10 +563,12 @@ function buildRecommendation(
       nutrition: "Prioritize regular meals, fluids, and carbohydrate and protein sources that fit your usual routine.",
       recovery: "Keep movement gentle and make time for your usual sleep and recovery routine.",
       confidence: 88,
+      recoveryAdjustment: recoveryExplanation,
       reasoning: [
         ...profileData,
         ...historyReasoning,
         ...plannerReasoning,
+        ...recoveryReasoning,
         `Training sessions influencing the decision this week: ${thisWeekWorkouts.length ? [...new Map(thisWeekWorkouts.map((workout) => [workout.sessionId, workout])).values()].map((workout) => `${workout.workoutTitle || workout.activityType} (${formatWorkoutDate(workout.workoutDate)})`).join("; ") : "none recorded"}.`,
         `Rule applied: ${recoveryReasons.join("; ")}.`,
       ],
@@ -392,7 +586,12 @@ function buildRecommendation(
     "Triathlon",
     "Cycling Event",
   ].includes(profile.primaryGoal);
-  const durationMinutes = isLongDay && goalSupportsEndurance ? 75 : 45;
+  const plannedDurationMinutes = isLongDay && goalSupportsEndurance ? 75 : 45;
+  const durationMinutes = Math.min(
+    plannedDurationMinutes,
+    recovery?.availableTrainingMinutes ?? plannedDurationMinutes,
+  );
+  const fallbackTimeLimited = durationMinutes < plannedDurationMinutes;
   const duration = `${durationMinutes} minutes`;
   const goalAlignedRecommendation =
     activity === "Run"
@@ -444,16 +643,21 @@ function buildRecommendation(
               ? "Use familiar strength movements with controlled, comfortable repetitions."
               : "Choose familiar movement and keep the effort controlled.",
     purpose: `Support your ${goalLabel(profile)} goal with a manageable session.`,
-    why: `Selected to match ${whyParts.join(", ")}.`,
+    why: `Selected to match ${whyParts.join(", ")}.${fallbackTimeLimited ? ` Shortened to fit the ${recovery?.availableTrainingMinutes}-minute training time you entered.` : ""}`,
     nutrition: activity === "Strength"
       ? "Include a protein-containing meal or snack as part of your normal daily eating."
       : "Include familiar carbohydrate and protein sources around the session, and drink to thirst.",
     recovery: "Keep the effort controlled and leave room for your next planned session.",
     confidence: isNoWorkouts ? 78 : 84,
+    recoveryAdjustment: fallbackTimeLimited
+      ? `Today's recommendation was shortened to fit the ${recovery?.availableTrainingMinutes}-minute training time you entered.`
+      : recoveryExplanation,
     reasoning: [
       ...profileData,
       ...historyReasoning,
       ...plannerReasoning,
+      ...recoveryReasoning,
+      ...(fallbackTimeLimited ? [`Duration reduced from ${plannedDurationMinutes} to ${durationMinutes} minutes to fit the time entered for today.`] : []),
       historyReason,
       `Rule applied: ${isNoWorkouts ? "with no training sessions this week, choose an activity aligned with the primary goal" : `with ${thisWeekSessionCount} training session${thisWeekSessionCount === 1 ? "" : "s"} completed and no recovery threshold reached, continue with a goal-aligned session`}.`,
       ...(lastWorkout ? [`Last workout type was ${lastWorkout.activityType}${lastWorkoutAgeDays === 0 ? " today" : ` ${lastWorkoutAgeDays} day${lastWorkoutAgeDays === 1 ? "" : "s"} ago`}; recent logged types: ${[...new Set(recentTypes)].join(", ") || "none this week"}.`] : []),
@@ -491,11 +695,267 @@ export function TodaysDecision() {
   const { profile, isProfileLoaded } = useAthleteProfile();
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [plannedWorkouts, setPlannedWorkouts] = useState<PlannedSession[]>([]);
+  const [recoveryCheckIn, setRecoveryCheckIn] = useState<RecoveryCheckIn>();
+  const [recoveryError, setRecoveryError] = useState("");
   const [isWorkoutHistoryLoaded, setIsWorkoutHistoryLoaded] = useState(false);
   const [isPlannerLoaded, setIsPlannerLoaded] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [plannerError, setPlannerError] = useState("");
+  const [completionError, setCompletionError] = useState("");
+  const [completionFeedback, setCompletionFeedback] = useState("");
+  const [completingPlanId, setCompletingPlanId] = useState("");
+  const [workoutDetailsOpen, setWorkoutDetailsOpen] = useState(false);
+  const [detailWorkoutId, setDetailWorkoutId] = useState("");
+  const [showCompletionForm, setShowCompletionForm] = useState(false);
+  const [showModificationForm, setShowModificationForm] = useState(false);
+  const [showMoveForm, setShowMoveForm] = useState(false);
+  const [showLongWorkoutWarning, setShowLongWorkoutWarning] = useState(false);
+  const [targetMoveDay, setTargetMoveDay] = useState("");
+  const [activityEdits, setActivityEdits] = useState<ActivityEdit[]>([]);
+  const [actualDuration, setActualDuration] = useState("");
+  const [actualNotes, setActualNotes] = useState("");
+  const [completedActivityIds, setCompletedActivityIds] = useState<string[]>([]);
+  const [actualDistances, setActualDistances] = useState<Record<string, string>>({});
+  const [sessionStatistics, setSessionStatistics] = useState<SessionStatistics>({
+    averageHeartRate: "",
+    maximumHeartRate: "",
+    averagePace: "",
+    averagePower: "",
+    calories: "",
+  });
   const [today, setToday] = useState<Date | null>(null);
+
+  function openWorkoutDetails() {
+    if (!plannedWorkout) return;
+    setCompletionError("");
+    setDetailWorkoutId(plannedWorkout.id);
+    setCompletedActivityIds(plannedWorkout.activities.map((activity) => activity.id));
+    setActualDuration(String(plannedSessionDuration(plannedWorkout)));
+    setActualNotes("");
+    setActualDistances(
+      Object.fromEntries(
+        plannedWorkout.activities
+          .filter((activity) => activity.distance !== undefined)
+          .map((activity) => [activity.id, String(activity.distance)]),
+      ),
+    );
+    setSessionStatistics({
+      averageHeartRate: "",
+      maximumHeartRate: "",
+      averagePace: "",
+      averagePower: "",
+      calories: "",
+    });
+    setShowCompletionForm(false);
+    setShowModificationForm(false);
+    setShowMoveForm(false);
+    setShowLongWorkoutWarning(false);
+    setWorkoutDetailsOpen(true);
+  }
+
+  function beginWorkoutModification() {
+    if (!detailedWorkout) return;
+    setActivityEdits(
+      detailedWorkout.activities.map((activity) => ({
+        id: activity.id,
+        activityType: activity.activityType,
+        durationMinutes: String(activity.durationMinutes),
+        distance: activity.distance === undefined ? "" : String(activity.distance),
+        intensity: activity.intensity,
+        instructions: activity.instructions,
+        purpose: activity.purpose,
+      })),
+    );
+    setShowModificationForm(true);
+    setShowCompletionForm(false);
+    setShowMoveForm(false);
+    setShowLongWorkoutWarning(false);
+    setCompletionError("");
+  }
+
+  function saveWorkoutModification() {
+    if (!detailedWorkout || activityEdits.length === 0) return;
+    const updatedActivities: PlannedActivity[] = activityEdits.map((activity) => ({
+      id: activity.id,
+      activityType: activity.activityType,
+      durationMinutes: Number(activity.durationMinutes),
+      ...(activity.distance.trim() ? { distance: Number(activity.distance) } : {}),
+      intensity: activity.intensity,
+      instructions: activity.instructions,
+      purpose: activity.purpose,
+    }));
+    if (
+      updatedActivities.some(
+        (activity) =>
+          !Number.isFinite(activity.durationMinutes) ||
+          activity.durationMinutes <= 0 ||
+          (activity.distance !== undefined &&
+            (!Number.isFinite(activity.distance) || activity.distance < 0)),
+      )
+    ) {
+      setCompletionError("Enter a valid duration and non-negative distance for each activity.");
+      return;
+    }
+    const title = updatedActivities.map((activity) => activity.activityType).join(" + ");
+    try {
+      updatePlannedSession(detailedWorkout.id, {
+        activities: updatedActivities,
+        title,
+        modified: true,
+      });
+      setShowModificationForm(false);
+      setCompletionFeedback("Today's planned workout was updated.");
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error ? error.message : "The workout changes could not be saved.",
+      );
+    }
+  }
+
+  function moveTodaysWorkout() {
+    if (!detailedWorkout || !targetMoveDay) return;
+    const targetDay = weekDays.find((day) => day === targetMoveDay);
+    if (!targetDay) return;
+    const nextDate = new Date(`${detailedWorkout.date}T00:00:00`);
+    nextDate.setDate(nextDate.getDate() + weekDays.indexOf(targetDay) - weekDays.indexOf(detailedWorkout.day));
+    const nextDateString = localDateString(nextDate);
+    try {
+      updatePlannedSession(detailedWorkout.id, {
+        day: targetDay,
+        date: nextDateString,
+        rescheduledFromDay: detailedWorkout.rescheduledFromDay ?? detailedWorkout.day,
+        status: "Planned",
+      });
+      setShowMoveForm(false);
+      setShowLongWorkoutWarning(false);
+      setTargetMoveDay("");
+      setCompletionFeedback(`Workout moved from ${detailedWorkout.day} to ${targetDay}.`);
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error ? error.message : "The planned workout could not be moved.",
+      );
+    }
+  }
+
+  function skipTodaysWorkout() {
+    if (!detailedWorkout) return;
+    try {
+      updatePlannedSession(detailedWorkout.id, { status: "Skipped" });
+      setWorkoutDetailsOpen(false);
+      setCompletionFeedback("Workout skipped. Your completed training history is unchanged.");
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error ? error.message : "The planned workout could not be skipped.",
+      );
+    }
+  }
+
+  function requestWorkoutMove() {
+    setShowCompletionForm(false);
+    setShowModificationForm(false);
+    setShowMoveForm(false);
+    if (isDetailedWorkoutLongest && detailedWorkout?.day === profile?.longWorkoutDay) {
+      setShowLongWorkoutWarning(true);
+      return;
+    }
+    setShowLongWorkoutWarning(false);
+    setShowMoveForm(true);
+  }
+
+  function markWorkoutComplete(session: PlannedSession) {
+    setCompletingPlanId(session.id);
+    setCompletionError("");
+    setCompletionFeedback("");
+    try {
+      const sessionForCompletion =
+        recommendation?.plannedSessionId === session.id && recommendation.activities
+          ? { ...session, activities: recommendation.activities }
+          : session;
+      completePlannedSession(sessionForCompletion, undefined, profile?.units ?? "Metric");
+      setCompletionFeedback("Workout marked complete. Your plan, adherence, and training history are updated.");
+      setWorkoutDetailsOpen(false);
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error
+          ? error.message
+          : "The workout could not be marked complete. Try again.",
+      );
+    } finally {
+      setCompletingPlanId("");
+    }
+  }
+
+  function markWorkoutCompleteWithChanges() {
+    if (!detailedWorkout) return;
+    const numeric = (value: string) => (value.trim() ? Number(value) : undefined);
+    const statistics = {
+      averageHeartRate: numeric(sessionStatistics.averageHeartRate),
+      maximumHeartRate: numeric(sessionStatistics.maximumHeartRate),
+      averagePace: sessionStatistics.averagePace.trim() || undefined,
+      averagePower: numeric(sessionStatistics.averagePower),
+      calories: numeric(sessionStatistics.calories),
+    };
+    const invalidStats = Object.values(statistics).some(
+      (value) => typeof value === "number" && (!Number.isFinite(value) || value < 0),
+    );
+    if (invalidStats) {
+      setCompletionError("Optional statistics must be valid non-negative values.");
+      return;
+    }
+    const changes: CompletedSessionChanges = {
+      durationMinutes: Number(actualDuration),
+      notes: actualNotes,
+      completedActivityIds,
+      distanceByActivity: Object.fromEntries(
+        Object.entries(actualDistances)
+          .filter(([activityId, value]) => completedActivityIds.includes(activityId) && value.trim())
+          .map(([activityId, value]) => [activityId, Number(value)]),
+      ),
+      ...(statistics.averageHeartRate === undefined ? {} : { averageHeartRate: statistics.averageHeartRate }),
+      ...(statistics.maximumHeartRate === undefined ? {} : { maximumHeartRate: statistics.maximumHeartRate }),
+      ...(statistics.averagePace === undefined ? {} : { averagePace: statistics.averagePace }),
+      ...(statistics.averagePower === undefined ? {} : { averagePower: statistics.averagePower }),
+      ...(statistics.calories === undefined ? {} : { calories: statistics.calories }),
+    };
+    if (!Number.isFinite(changes.durationMinutes) || changes.durationMinutes <= 0) {
+      setCompletionError("Enter the total actual workout duration in minutes.");
+      return;
+    }
+    if (
+      Object.values(changes.distanceByActivity ?? {}).some(
+        (distance) => !Number.isFinite(distance) || distance < 0,
+      )
+    ) {
+      setCompletionError("Actual distances must be valid non-negative values.");
+      return;
+    }
+    setCompletingPlanId(detailedWorkout.id);
+    setCompletionError("");
+    try {
+      completePlannedSession(detailedWorkout, changes, profile?.units ?? "Metric");
+      setCompletionFeedback("Workout saved with your changes and linked to Training Sessions.");
+      setWorkoutDetailsOpen(false);
+      setShowCompletionForm(false);
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error
+          ? error.message
+          : "The completed session could not be saved. Try again.",
+      );
+    } finally {
+      setCompletingPlanId("");
+    }
+
+  }
+
+  useEffect(() => {
+    if (!workoutDetailsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setWorkoutDetailsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [workoutDetailsOpen]);
 
   useEffect(() => {
     const loadWorkouts = () => {
@@ -579,22 +1039,40 @@ export function TodaysDecision() {
         setIsPlannerLoaded(true);
       }
     };
+    const loadRecovery = () => {
+      try {
+        const todayDate = localRecoveryDate();
+        const records = readRecoveryCheckIns();
+        setRecoveryCheckIn(records.find((record) => record.date === todayDate));
+        setRecoveryError("");
+      } catch (error) {
+        setRecoveryCheckIn(undefined);
+        setRecoveryError(
+          error instanceof Error
+            ? error.message
+            : "Saved recovery check-in is unavailable.",
+        );
+      }
+    };
     const updateDate = () => setToday(new Date());
     const loadAll = () => {
       loadWorkouts();
       loadPlanner();
+      loadRecovery();
     };
     loadAll();
     updateDate();
     window.addEventListener("storage", loadAll);
     window.addEventListener(WORKOUTS_UPDATED_EVENT, loadWorkouts);
     window.addEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlanner);
+    window.addEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, loadRecovery);
     window.addEventListener("focus", loadAll);
     window.addEventListener("visibilitychange", loadAll);
     return () => {
       window.removeEventListener("storage", loadAll);
       window.removeEventListener(WORKOUTS_UPDATED_EVENT, loadWorkouts);
       window.removeEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlanner);
+      window.removeEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, loadRecovery);
       window.removeEventListener("focus", loadAll);
       window.removeEventListener("visibilitychange", loadAll);
     };
@@ -631,13 +1109,16 @@ export function TodaysDecision() {
     ...(profile?.availableTrainingDays.length ? [] : ["available training days"]),
     ...(hasSupportedEquipment ? [] : ["available equipment"]),
   ];
-  const recommendation = useMemo(
-    () =>
-      isProfileComplete && profile && today && isPlannerLoaded && !plannerError
-        ? buildRecommendation(profile, workouts, plannedWorkouts, today)
-        : null,
-    [isProfileComplete, isPlannerLoaded, plannerError, plannedWorkouts, profile, today, workouts],
-  );
+  const recommendation =
+    isProfileComplete && profile && today && isPlannerLoaded && !plannerError
+      ? buildRecommendation(profile, workouts, plannedWorkouts, today, recoveryCheckIn)
+      : null;
+  const plannedWorkout = recommendation?.plannedSessionId
+    ? plannedWorkouts.find((session) => session.id === recommendation.plannedSessionId)
+    : undefined;
+  const detailedWorkout = detailWorkoutId
+    ? plannedWorkouts.find((session) => session.id === detailWorkoutId)
+    : undefined;
   const generatedDate = today
     ? today.toLocaleDateString(undefined, {
         weekday: "long",
@@ -646,8 +1127,43 @@ export function TodaysDecision() {
         year: "numeric",
       })
     : "Preparing recommendation";
+  const workoutSource = detailedWorkout
+      ? detailedWorkout.rescheduledFromDay
+        ? "Rescheduled Workout"
+        : detailedWorkout.generated
+          ? "Generated Weekly Plan"
+          : "Manual Plan"
+      : "";
+  const workoutWeekStart = today
+      ? localDateString(startOfWeek(today))
+      : "";
+  const detailedWeekSessions = detailedWorkout
+      ? plannedWorkouts.filter(
+          (session) =>
+            session.date >= workoutWeekStart &&
+            session.date <=
+              localDateString(
+                new Date(
+                  startOfWeek(today ?? new Date()).getFullYear(),
+                  startOfWeek(today ?? new Date()).getMonth(),
+                  startOfWeek(today ?? new Date()).getDate() + 6,
+                ),
+              ) &&
+            session.status !== "Skipped",
+        )
+      : [];
+  const isDetailedWorkoutLongest =
+      Boolean(detailedWorkout) &&
+      (detailedWorkout
+        ? plannedSessionDuration(detailedWorkout)
+        : 0) >=
+        detailedWeekSessions.reduce(
+          (longest, session) => Math.max(longest, plannedSessionDuration(session)),
+          0,
+        );
 
   return (
+    <>
     <section
       aria-labelledby="todays-decision-heading"
       className="relative mb-5 overflow-hidden rounded-xl border border-[#b8f36b]/20 p-5 sm:p-7 lg:p-8"
@@ -676,6 +1192,12 @@ export function TodaysDecision() {
             {generatedDate}
           </div>
         </div>
+
+        {completionFeedback && (
+          <p className="mt-4 text-xs text-[#c5ef97]" role="status">
+            {completionFeedback}
+          </p>
+        )}
 
         {!isProfileLoaded || !isWorkoutHistoryLoaded || !isPlannerLoaded ? (
           <p className="mt-6 text-xs text-[#87938b]" role="status">
@@ -706,26 +1228,38 @@ export function TodaysDecision() {
           <>
             <div className="mt-6 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
               <div className="rounded-lg border border-[#b8f36b]/15 bg-[#0b100e]/65 p-4 sm:p-5">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#839087]">
-                  Recommended workout
-                </p>
-                <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <h3 className="text-[22px] font-semibold tracking-[-0.035em] text-[#f0f4ef]">
-                    {recommendation.title}
-                  </h3>
-                  <span className="flex items-center gap-1 text-xs text-[#b8f36b]">
-                    <Clock3 aria-hidden="true" size={13} />
-                    {recommendation.duration}
+                <button
+                  className="block w-full rounded-md text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#b8f36b]"
+                  disabled={!plannedWorkout}
+                  onClick={openWorkoutDetails}
+                  type="button"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#839087]">
+                    Recommended workout
                   </span>
-                </div>
-                <p className="mt-2 max-w-2xl text-xs leading-relaxed text-[#a6b1a9]">
-                  {recommendation.why}
+                  <span className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <span className="text-[22px] font-semibold tracking-[-0.035em] text-[#f0f4ef]">
+                      {recommendation.title}
+                    </span>
+                    <span className="flex items-center gap-1 text-xs text-[#b8f36b]">
+                      <Clock3 aria-hidden="true" size={13} />
+                      {recommendation.duration}
+                    </span>
+                  </span>
+                  <span className="mt-2 block max-w-2xl text-xs leading-relaxed text-[#a6b1a9]">
+                    {recommendation.why}
+                  </span>
+                  {recommendation.plannerBased && (
+                    <span className="mt-3 inline-flex rounded-full border border-[#8dd7e5]/15 bg-[#8dd7e5]/[0.05] px-2.5 py-1 text-[9px] font-medium text-[#b9e5eb]">
+                      From your Training Planner
+                    </span>
+                  )}
+                </button>
+                <p className="mt-3 text-[10px] leading-relaxed text-[#b9e5eb]">
+                  {recoveryError
+                    ? `Recovery check-in unavailable: ${recoveryError}`
+                    : recommendation.recoveryAdjustment}
                 </p>
-                {recommendation.plannerBased && (
-                  <p className="mt-3 inline-flex rounded-full border border-[#8dd7e5]/15 bg-[#8dd7e5]/[0.05] px-2.5 py-1 text-[9px] font-medium text-[#b9e5eb]">
-                    From your Training Planner
-                  </p>
-                )}
                 {recommendation.activities && (
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {recommendation.activities.map((activity) => (
@@ -733,8 +1267,15 @@ export function TodaysDecision() {
                         <p className="text-[10px] font-semibold text-[#dce4dd]">
                           {activity.activityType} · {activity.durationMinutes} min · {activity.intensity}
                         </p>
-                        <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">{activity.instructions}</p>
-                        <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">{activity.purpose}</p>
+                        <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                          <span className="font-semibold">Plain-language explanation:</span> {activity.instructions}
+                        </p>
+                        <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">
+                          <span className="font-semibold">Purpose:</span> {activity.purpose}
+                        </p>
+                        <p className="mt-1 text-[9px] leading-relaxed text-[#87938b]">
+                          <span className="font-semibold">Expected effort:</span> {effortExplanation(activity.intensity)}
+                        </p>
                       </div>
                     ))}
                   </div>
@@ -742,10 +1283,46 @@ export function TodaysDecision() {
                 {recommendation.instructions && !recommendation.activities && (
                   <p className="mt-3 text-xs leading-relaxed text-[#c2cdc5]">{recommendation.instructions}</p>
                 )}
-                {recommendation.purpose && (
+                {recommendation.purpose && !recommendation.activities && (
                   <p className="mt-2 text-[10px] leading-relaxed text-[#87938b]">
                     Purpose: {recommendation.purpose}
                   </p>
+                )}
+                {recommendation.plannedSessionId && (
+                  <div className="mt-4 flex flex-wrap items-center gap-3">
+                    <button
+                      className="rounded-lg border border-[#8dd7e5]/25 px-3 py-2 text-xs font-medium text-[#b9e5eb] hover:bg-[#8dd7e5]/[0.06]"
+                      onClick={openWorkoutDetails}
+                      type="button"
+                    >
+                      View Workout
+                    </button>
+                    <button
+                      className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#102010] hover:bg-[#c8f78b] disabled:cursor-wait disabled:opacity-60"
+                      disabled={completingPlanId === recommendation.plannedSessionId}
+                      onClick={() => {
+                        const session = plannedWorkouts.find(
+                          (item) => item.id === recommendation.plannedSessionId,
+                        );
+                        if (session) markWorkoutComplete(session);
+                      }}
+                      type="button"
+                    >
+                      {completingPlanId === recommendation.plannedSessionId
+                        ? "Saving..."
+                        : "Mark Complete"}
+                    </button>
+                    {completionFeedback && (
+                      <p className="text-[10px] text-[#c5ef97]" role="status">
+                        {completionFeedback}
+                      </p>
+                    )}
+                    {completionError && (
+                      <p className="text-[10px] text-[#f0b47c]" role="alert">
+                        {completionError}
+                      </p>
+                    )}
+                  </div>
                 )}
                 <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-white/[0.07] pt-3">
                   <span className="rounded-full border border-[#b8f36b]/15 bg-[#b8f36b]/[0.06] px-2.5 py-1 text-[10px] font-medium text-[#c5ef97]">
@@ -796,5 +1373,621 @@ export function TodaysDecision() {
         )}
       </div>
     </section>
+    {workoutDetailsOpen && detailedWorkout && profile && (
+      <div
+        className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 backdrop-blur-sm sm:items-center sm:p-5"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setWorkoutDetailsOpen(false);
+        }}
+      >
+        <section
+          aria-labelledby="todays-workout-guide-heading"
+          aria-modal="true"
+          className="max-h-[94vh] w-full max-w-3xl overflow-y-auto rounded-t-2xl border border-white/[0.09] bg-[#0d1310] p-5 shadow-2xl sm:rounded-xl sm:p-7"
+          role="dialog"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-white/[0.07] pb-4">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#b8f36b]">
+                Today&apos;s Workout
+              </p>
+              <h2
+                className="mt-1 text-xl font-semibold tracking-[-0.03em] text-[#eef2ed] sm:text-2xl"
+                id="todays-workout-guide-heading"
+              >
+                {detailedWorkout.title}
+              </h2>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <span className="rounded-full border border-[#8dd7e5]/15 bg-[#8dd7e5]/[0.05] px-2.5 py-1 text-[9px] text-[#b9e5eb]">
+                  {workoutSource}
+                </span>
+                {detailedWorkout.modified && (
+                  <span className="rounded-full border border-[#f0b47c]/20 bg-[#f0b47c]/[0.06] px-2.5 py-1 text-[9px] text-[#f0c49d]">
+                    Modified
+                  </span>
+                )}
+                {detailedWorkout.status === "Completed" && (
+                  <span className="rounded-full border border-[#b8f36b]/20 bg-[#b8f36b]/[0.06] px-2.5 py-1 text-[9px] text-[#c5ef97]">
+                    Completed
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              aria-label="Close workout details"
+              className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] text-[#a6b1a9] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]"
+              onClick={() => setWorkoutDetailsOpen(false)}
+              type="button"
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Activity", detailedWorkout.activities.map((activity) => activity.activityType).join(" + ")],
+              ["Planned duration", `${plannedSessionDuration(detailedWorkout)} min`],
+              [
+                "Planned distance",
+                detailedWorkout.activities
+                  .filter((activity) => activity.distance !== undefined)
+                  .map(
+                    (activity) =>
+                      `${activity.distance} ${activityDistanceUnit(activity.activityType, profile)}`,
+                  )
+                  .join(" + ") || "Not set",
+              ],
+              ["Planned for", `${detailedWorkout.day} · ${formatWorkoutDate(detailedWorkout.date)}`],
+            ].map(([label, value]) => (
+              <div className="rounded-lg border border-white/[0.06] bg-[#141b17] p-3" key={label}>
+                <p className="text-[9px] text-[#78857d]">{label}</p>
+                <p className="mt-1 text-xs font-medium text-[#dce4dd]">{value}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 rounded-lg border border-[#b8f36b]/15 bg-[#b8f36b]/[0.035] p-4">
+            <h3 className="text-xs font-semibold text-[#eef2ed]">Purpose</h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#c2cdc5]">
+              {detailedWorkout.activities.map((activity) => activity.purpose).filter(Boolean).join(" ")}
+            </p>
+            <h3 className="mt-3 text-xs font-semibold text-[#eef2ed]">Why today</h3>
+            <p className="mt-1 text-xs leading-relaxed text-[#c2cdc5]">
+              {detailedWorkout.reason}
+              {detailedWorkout.rescheduledFromDay
+                ? ` This workout was moved from ${detailedWorkout.rescheduledFromDay} to ${detailedWorkout.day}.`
+                : ` It is part of your ${goalLabel(profile)} plan.`}
+            </p>
+            {recommendation?.plannedSessionId === detailedWorkout.id &&
+              recommendation.recoveryAdjustment && (
+                <p className="mt-2 rounded-md border border-[#8dd7e5]/10 bg-[#8dd7e5]/[0.04] p-2.5 text-[10px] leading-relaxed text-[#b9e5eb]">
+                  {recommendation.recoveryAdjustment} The saved planner workout has not been changed.
+                </p>
+              )}
+          </div>
+
+          <div className="mt-4 grid gap-3">
+            {detailedWorkout.activities.map((activity, index) => {
+              const ActivityIcon = activityIcon(activity.activityType);
+              const segments = workoutTimeSegments(activity.durationMinutes);
+              const isSwim = activity.activityType === "Swim";
+              const isRun = activity.activityType === "Run";
+              const isRide = activity.activityType === "Ride";
+              const isStrength = activity.activityType === "Strength";
+              const relevantEquipment = profile.equipment.filter((item) =>
+                isRun
+                  ? ["Running access", "Treadmill"].includes(item)
+                  : isRide
+                    ? ["Road bike", "Indoor bike trainer"].includes(item)
+                    : isSwim
+                      ? ["Pool access", "Open-water swimming access"].includes(item)
+                      : isStrength
+                        ? ["Gym access", "Strength equipment"].includes(item)
+                        : false,
+              );
+              const distanceUnit = activityDistanceUnit(activity.activityType, profile);
+              const activityDistance =
+                activity.distance === undefined
+                  ? ""
+                  : `${activity.distance} ${distanceUnit}`;
+              const hasIntervals = /\b(intervals?|repeats?|sets?)\b/i.test(activity.instructions);
+              const swimDistance = activity.distance ?? 0;
+              const swimWarmup = swimDistance ? Math.round(swimDistance * 0.17) : 0;
+              const swimDrills = swimDistance ? Math.round(swimDistance * 0.17) : 0;
+              const swimCooldown = swimDistance ? Math.round(swimDistance * 0.16) : 0;
+              const swimMain = swimDistance
+                ? swimDistance - swimWarmup - swimDrills - swimCooldown
+                : 0;
+              return (
+                <article
+                  className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5"
+                  key={activity.id}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="flex size-7 items-center justify-center rounded-md bg-[#b8f36b]/10 text-[#b8f36b]">
+                      <ActivityIcon aria-hidden="true" size={14} />
+                    </span>
+                    <h3 className="text-sm font-semibold text-[#eef2ed]">
+                      {index + 1}. {activity.activityType}
+                    </h3>
+                    <span className="ml-auto text-[10px] text-[#a6b1a9]">
+                      {activity.durationMinutes} min{activityDistance ? ` · ${activityDistance}` : ""}
+                    </span>
+                  </div>
+                  {index > 0 && (
+                    <p className="mt-3 rounded-md border border-[#8dd7e5]/10 bg-[#8dd7e5]/[0.04] p-2.5 text-[10px] leading-relaxed text-[#b9e5eb]">
+                      Transition from the previous activity at a calm, safe pace. The workout plan does not specify a transition duration.
+                    </p>
+                  )}
+                  <ol className="mt-4 grid gap-3 sm:grid-cols-3">
+                    <li className="rounded-md border border-white/[0.05] bg-[#0b100e]/70 p-3">
+                      <p className="text-[10px] font-semibold text-[#c5ef97]">1 · Warm-up</p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        {isSwim
+                          ? swimDistance
+                            ? `${swimWarmup} ${distanceUnit} of relaxed swimming.`
+                            : "Begin with relaxed swimming as part of the planned time."
+                          : segments.warmup
+                            ? `Start with ${segments.warmup} minutes of easy movement${isRun ? ", such as walking and gentle jogging" : ""}.`
+                            : `Begin gently as part of the planned ${activity.durationMinutes} minutes.`}
+                      </p>
+                    </li>
+                    <li className="rounded-md border border-white/[0.05] bg-[#0b100e]/70 p-3 sm:col-span-1">
+                      <p className="text-[10px] font-semibold text-[#c5ef97]">2 · Main workout</p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        {activity.instructions || `Complete ${segments.main} minutes at the planned effort.`}
+                      </p>
+                      {!isSwim && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                          Main portion: about {segments.main} minutes{activityDistance ? `, or ${activityDistance} total` : ""}.
+                        </p>
+                      )}
+                      {isSwim && (
+                        <>
+                          <p className="mt-2 text-[10px] font-semibold text-[#c5ef97]">Drill set</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                            {swimDistance
+                              ? `${swimDrills} ${distanceUnit} of relaxed technique practice. Rest briefly between lengths as needed.`
+                              : "Practice a comfortable technique drill you already know; rest briefly between lengths as needed."}
+                          </p>
+                          <p className="mt-2 text-[10px] font-semibold text-[#c5ef97]">Main set</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                            {swimDistance
+                              ? `${swimMain} ${distanceUnit} at the planned effort, resting briefly between repeats as needed.`
+                              : `Swim steadily for about ${segments.main} minutes at the planned effort.`}
+                          </p>
+                        </>
+                      )}
+                      {isRide && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                          Cadence: no numeric target is saved; pedal smoothly at a comfortable rhythm. No power or heart-rate target is saved, so use the effort guidance below.
+                        </p>
+                      )}
+                      {isRun && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                          {hasIntervals
+                            ? "Follow only the intervals and recovery timing written in the saved workout instructions; no additional interval targets are assumed."
+                            : "No intervals are specified in this plan. Keep to the steady effort described in the saved workout."}
+                        </p>
+                      )}
+                      {isStrength && (
+                        <div className="mt-2">
+                          <p className="text-[10px] font-semibold text-[#c5ef97]">Strength details</p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                            Exercise names, sets, repetitions, rest periods, and technique are shown only when included in the saved workout instructions above. If they are not specified, use familiar movements you can perform comfortably; make it easier by reducing repetitions or using lighter resistance.
+                          </p>
+                        </div>
+                      )}
+                    </li>
+                    <li className="rounded-md border border-white/[0.05] bg-[#0b100e]/70 p-3">
+                      <p className="text-[10px] font-semibold text-[#c5ef97]">
+                        {isSwim ? "3 · Cooldown" : "3 · Cooldown"}
+                      </p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        {isSwim
+                          ? swimDistance
+                            ? `${swimCooldown} ${distanceUnit} of relaxed swimming.`
+                            : "Finish with relaxed swimming as part of the planned time."
+                          : segments.cooldown
+                            ? `Finish with ${segments.cooldown} minutes of easy movement.`
+                            : "Finish at an easy effort within the remaining planned time."}
+                      </p>
+                    </li>
+                  </ol>
+
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <div className="rounded-md bg-[#0b100e]/70 p-3">
+                      <p className="text-[10px] font-semibold text-[#dce4dd]">Effort guidance</p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        {effortExplanation(activity.intensity)}
+                      </p>
+                      <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">
+                        No pace, power, or heart-rate target is saved. Use how the effort feels rather than guessing at sensor numbers.
+                      </p>
+                    </div>
+                    <div className="rounded-md bg-[#0b100e]/70 p-3">
+                      <p className="text-[10px] font-semibold text-[#dce4dd]">Equipment needed</p>
+                      <p className="mt-1 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        {relevantEquipment.length
+                          ? relevantEquipment.join(", ")
+                          : isStrength
+                            ? "No specific equipment is required for the bodyweight options above."
+                            : "No specific equipment is listed in your athlete profile."}
+                      </p>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          {detailedWorkout.notes && (
+            <div className="mt-4 rounded-lg border border-white/[0.07] bg-[#111714] p-3">
+              <p className="text-[10px] font-semibold text-[#dce4dd]">Workout notes / modification</p>
+              <p className="mt-1 whitespace-pre-wrap text-[10px] leading-relaxed text-[#a6b1a9]">
+                {detailedWorkout.notes}
+              </p>
+            </div>
+          )}
+
+          <details className="mt-4 rounded-lg border border-white/[0.07] bg-[#111714] p-3.5">
+            <summary className="cursor-pointer text-xs font-semibold text-[#dce4dd] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]">
+              What does this mean?
+            </summary>
+            <ul className="mt-3 grid gap-2 text-[10px] leading-relaxed text-[#a6b1a9]">
+              <li><strong className="text-[#dce4dd]">Aerobic:</strong> steady exercise that uses oxygen to keep you moving; conversational effort is a practical guide.</li>
+              <li><strong className="text-[#dce4dd]">Zone 2:</strong> a common label for easy, steady effort. No heart-rate zone is prescribed here; use the talk test instead.</li>
+              <li><strong className="text-[#dce4dd]">Tempo / threshold:</strong> sustained faster efforts that feel controlled-hard. Neither is assumed unless stated in your saved workout.</li>
+              <li><strong className="text-[#dce4dd]">Intervals:</strong> repeated work periods with easier recovery between them. Follow only the timing in the planned instructions.</li>
+              <li><strong className="text-[#dce4dd]">Brick:</strong> two activities done one after another, often bike then run. Allow an unhurried transition between them.</li>
+              <li><strong className="text-[#dce4dd]">Recovery:</strong> an easier session or rest that gives your body time between harder efforts.</li>
+              <li><strong className="text-[#dce4dd]">Effort levels:</strong> Easy = full sentences; Moderate = short sentences; Hard = challenging but controlled; Recovery = very light.</li>
+            </ul>
+          </details>
+
+          <details className="mt-3 rounded-lg border border-[#8dd7e5]/10 bg-[#8dd7e5]/[0.035] p-3.5">
+            <summary className="cursor-pointer text-xs font-semibold text-[#b9e5eb] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]">
+              Make It Easier
+            </summary>
+            <p className="mt-2 text-[10px] leading-relaxed text-[#a6b1a9]">
+              Keep the warm-up and cooldown, and shorten the main portion by about 20% from the planned amount. For a multi-activity workout, shorten each activity and keep transitions relaxed. Stay at an easy conversational effort; skip any part that does not feel comfortable.
+            </p>
+          </details>
+
+          {completionError && (
+            <p className="mt-3 text-xs text-[#f0b47c]" role="alert">{completionError}</p>
+          )}
+
+          {showModificationForm && (
+            <section className="mt-4 rounded-lg border border-[#b8f36b]/15 bg-[#111714] p-4" aria-labelledby="modify-workout-heading">
+              <h3 className="text-xs font-semibold text-[#eef2ed]" id="modify-workout-heading">
+                Modify Today&apos;s Workout
+              </h3>
+              <p className="mt-1 text-[10px] leading-relaxed text-[#87938b]">
+                Changes apply to the planned activities only. Weekly planned hours recalculate automatically.
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {activityEdits.map((activity, index) => (
+                  <div className="grid gap-2 rounded-md border border-white/[0.06] bg-[#0b100e] p-3" key={activity.id}>
+                    <p className="text-[10px] font-semibold text-[#dce4dd]">Activity {index + 1}</p>
+                    <label className="grid gap-1 text-[9px] text-[#87938b]">
+                      Activity type
+                      <select
+                        className="min-h-9 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                        onChange={(event) => {
+                          const activityType = activityOptions.find((type) => type === event.currentTarget.value);
+                          if (!activityType) return;
+                          setActivityEdits((current) =>
+                            current.map((item) =>
+                              item.id === activity.id
+                                ? {
+                                    ...item,
+                                    activityType,
+                                    distance: "",
+                                    instructions:
+                                      activityType === "Run"
+                                        ? "Run at a comfortable effort where you can speak in full sentences."
+                                        : activityType === "Ride"
+                                          ? "Ride at a comfortable effort where conversation remains easy."
+                                          : activityType === "Swim"
+                                            ? "Swim relaxed lengths and pause as needed to keep your technique comfortable."
+                                            : activityType === "Strength"
+                                              ? "Practice familiar strength movements with controlled, comfortable repetitions."
+                                              : "Choose familiar movement that fits the planned effort and duration.",
+                                    purpose:
+                                      activityType === "Strength"
+                                        ? "Maintain strength with manageable effort."
+                                        : "Build consistency without making the next session harder.",
+                                  }
+                                : item,
+                            ),
+                          );
+                        }}
+                        value={activity.activityType}
+                      >
+                        {activityOptions.map((type) => <option key={type}>{type}</option>)}
+                      </select>
+                    </label>
+                    <label className="grid gap-1 text-[9px] text-[#87938b]">
+                      Duration (minutes)
+                      <input
+                        className="min-h-9 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                        min="1"
+                        onChange={(event) =>
+                          setActivityEdits((current) =>
+                            current.map((item) =>
+                              item.id === activity.id
+                                ? { ...item, durationMinutes: event.currentTarget.value }
+                                : item,
+                            ),
+                          )
+                        }
+                        type="number"
+                        value={activity.durationMinutes}
+                      />
+                    </label>
+                    {activity.activityType !== "Strength" && (
+                    <label className="grid gap-1 text-[9px] text-[#87938b]">
+                      Distance ({activityDistanceUnit(activity.activityType, profile)}, optional)
+                      <input
+                        className="min-h-9 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                        min="0"
+                        onChange={(event) =>
+                          setActivityEdits((current) =>
+                            current.map((item) =>
+                              item.id === activity.id
+                                ? { ...item, distance: event.currentTarget.value }
+                                : item,
+                            ),
+                          )
+                        }
+                        step="any"
+                        type="number"
+                        value={activity.distance}
+                      />
+                    </label>
+                    )}
+                    <label className="grid gap-1 text-[9px] text-[#87938b]">
+                      Intensity
+                      <select
+                        className="min-h-9 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                        onChange={(event) => {
+                          const intensity = intensityOptions.find((item) => item === event.currentTarget.value);
+                          if (!intensity) return;
+                          setActivityEdits((current) =>
+                            current.map((item) => item.id === activity.id ? { ...item, intensity } : item),
+                          );
+                        }}
+                        value={activity.intensity}
+                      >
+                        {intensityOptions.map((intensity) => <option key={intensity}>{intensity}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="rounded-md bg-[#b8f36b] px-3 py-2 text-[10px] font-semibold text-[#102010]" onClick={saveWorkoutModification} type="button">
+                  Save Workout Changes
+                </button>
+                <button className="rounded-md border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]" onClick={() => setShowModificationForm(false)} type="button">
+                  Cancel
+                </button>
+              </div>
+            </section>
+          )}
+
+          {showLongWorkoutWarning && (
+            <section
+              className="mt-4 rounded-lg border border-[#f0b47c]/20 bg-[#f0b47c]/[0.05] p-4"
+              aria-labelledby="long-workout-move-warning"
+            >
+              <h3 className="text-xs font-semibold text-[#f0c49d]" id="long-workout-move-warning">
+                Confirm long-workout move
+              </h3>
+              <p className="mt-2 text-[10px] leading-relaxed text-[#f0c49d]">
+                This workout is currently your week&apos;s long workout and is scheduled on your preferred long-workout day. Are you sure you want to move it?
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  className="rounded-md bg-[#f0b47c] px-3 py-2 text-[10px] font-semibold text-[#1b140e]"
+                  onClick={() => {
+                    setShowLongWorkoutWarning(false);
+                    setShowMoveForm(true);
+                  }}
+                  type="button"
+                >
+                  Continue
+                </button>
+                <button
+                  className="rounded-md border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]"
+                  onClick={() => setShowLongWorkoutWarning(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </div>
+            </section>
+          )}
+
+          {showMoveForm && (
+            <section className="mt-4 rounded-lg border border-[#8dd7e5]/10 bg-[#111714] p-4" aria-labelledby="move-workout-heading">
+              <h3 className="text-xs font-semibold text-[#dce4dd]" id="move-workout-heading">Move Workout</h3>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <label className="sr-only" htmlFor="today-workout-move-day">Move workout to day</label>
+                <select
+                  className="min-h-9 rounded-md border border-white/[0.08] bg-[#0b100e] px-2 text-xs text-[#dce4dd]"
+                  id="today-workout-move-day"
+                  onChange={(event) =>
+                    setTargetMoveDay(weekDays.find((day) => day === event.currentTarget.value) ?? "")
+                  }
+                  value={targetMoveDay}
+                >
+                  <option value="">Select an available day</option>
+                  {profile.availableTrainingDays
+                    .filter((day) => day !== detailedWorkout.day)
+                    .map((day) => <option key={day}>{day}</option>)}
+                </select>
+                <button
+                  className="rounded-md bg-[#8dd7e5]/10 px-3 py-2 text-[10px] font-medium text-[#b9e5eb] disabled:opacity-50"
+                  disabled={!targetMoveDay}
+                  onClick={moveTodaysWorkout}
+                  type="button"
+                >
+                  Move Workout
+                </button>
+                <button className="rounded-md border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]" onClick={() => setShowMoveForm(false)} type="button">
+                  Cancel
+                </button>
+              </div>
+            </section>
+          )}
+
+          {showCompletionForm && (
+            <section className="mt-4 rounded-lg border border-[#b8f36b]/15 bg-[#111714] p-4" aria-labelledby="completed-changes-heading">
+              <h3 className="text-xs font-semibold text-[#eef2ed]" id="completed-changes-heading">
+                Completed With Changes
+              </h3>
+              <p className="mt-1 text-[10px] leading-relaxed text-[#87938b]">
+                Enter what you actually did. The completed session will be linked to this planned workout.
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <label className="grid gap-1 text-[9px] text-[#87938b]">
+                  Actual total duration (minutes)
+                  <input className="min-h-9 rounded-md border border-white/[0.08] bg-[#0b100e] px-2 text-xs text-[#dce4dd]" min="1" onChange={(event) => setActualDuration(event.currentTarget.value)} type="number" value={actualDuration} />
+                </label>
+                <label className="grid gap-1 text-[9px] text-[#87938b] sm:col-span-2">
+                  Notes
+                  <textarea className="min-h-16 rounded-md border border-white/[0.08] bg-[#0b100e] px-2 py-2 text-xs text-[#dce4dd]" onChange={(event) => setActualNotes(event.currentTarget.value)} value={actualNotes} />
+                </label>
+                <fieldset className="grid gap-2 sm:col-span-2">
+                  <legend className="text-[10px] font-semibold text-[#dce4dd]">Activities completed and actual distance</legend>
+                  {detailedWorkout.activities.map((activity) => (
+                    <div className="flex flex-wrap items-center gap-3 rounded-md bg-[#0b100e] p-2" key={activity.id}>
+                      <label className="flex items-center gap-2 text-[10px] text-[#dce4dd]">
+                        <input
+                          checked={completedActivityIds.includes(activity.id)}
+                          onChange={(event) =>
+                            setCompletedActivityIds((current) =>
+                              event.currentTarget.checked
+                                ? [...current, activity.id]
+                                : current.filter((id) => id !== activity.id),
+                            )
+                          }
+                          type="checkbox"
+                        />
+                        {activity.activityType}
+                      </label>
+                      {completedActivityIds.includes(activity.id) && activity.activityType !== "Strength" && (
+                        <label className="ml-auto flex items-center gap-2 text-[9px] text-[#87938b]">
+                          Distance ({activityDistanceUnit(activity.activityType, profile)})
+                          <input
+                            className="min-h-8 w-24 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                            min="0"
+                            onChange={(event) =>
+                              setActualDistances((current) => ({
+                                ...current,
+                                [activity.id]: event.currentTarget.value,
+                              }))
+                            }
+                            step="any"
+                            type="number"
+                            value={actualDistances[activity.id] ?? ""}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  ))}
+                </fieldset>
+                <details className="rounded-md border border-white/[0.06] bg-[#0b100e] p-3 sm:col-span-2">
+                  <summary className="cursor-pointer text-[10px] font-semibold text-[#dce4dd]">Optional statistics</summary>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {([
+                      ["averageHeartRate", "Average heart rate (bpm)"],
+                      ["maximumHeartRate", "Maximum heart rate (bpm)"],
+                      ["averagePace", "Average pace (e.g. 6:00 /km)"],
+                      ["averagePower", "Average power (watts)"],
+                      ["calories", "Calories"],
+                    ] as const).map(([field, label]) => (
+                      <label className="grid gap-1 text-[9px] text-[#87938b]" key={field}>
+                        {label}
+                        <input
+                          className="min-h-9 rounded-md border border-white/[0.08] bg-[#111714] px-2 text-xs text-[#dce4dd]"
+                          min={field === "averagePace" ? undefined : "0"}
+                          onChange={(event) =>
+                            setSessionStatistics((current) => ({
+                              ...current,
+                              [field]: event.currentTarget.value,
+                            }))
+                          }
+                          step={field === "averagePace" ? undefined : "any"}
+                          type={field === "averagePace" ? "text" : "number"}
+                          value={sessionStatistics[field]}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[9px] text-[#78857d]">
+                    Statistics are optional; blank fields stay blank. Session-level statistics are saved with the first completed activity.
+                  </p>
+                </details>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  className="rounded-md bg-[#b8f36b] px-3 py-2 text-[10px] font-semibold text-[#102010] disabled:opacity-50"
+                  disabled={completingPlanId === detailedWorkout.id}
+                  onClick={markWorkoutCompleteWithChanges}
+                  type="button"
+                >
+                  {completingPlanId === detailedWorkout.id ? "Saving..." : "Save Completed Session"}
+                </button>
+                <button className="rounded-md border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]" onClick={() => setShowCompletionForm(false)} type="button">
+                  Cancel
+                </button>
+              </div>
+            </section>
+          )}
+
+          <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-white/[0.07] pt-4">
+            {detailedWorkout.status !== "Completed" && (
+              <>
+                <button className="rounded-lg border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9] hover:text-white" onClick={beginWorkoutModification} type="button">
+                  Modify Today&apos;s Workout
+                </button>
+                <button
+                  className="rounded-lg border border-[#8dd7e5]/20 px-3 py-2 text-[10px] text-[#b9e5eb]"
+                  onClick={requestWorkoutMove}
+                  type="button"
+                >
+                  Move Workout
+                </button>
+                <button
+                  className="rounded-lg border border-[#b8f36b]/20 px-3 py-2 text-[10px] text-[#c5ef97]"
+                  onClick={() => {
+                    setShowCompletionForm((shown) => !shown);
+                    setShowMoveForm(false);
+                    setShowModificationForm(false);
+                    setShowLongWorkoutWarning(false);
+                  }}
+                  type="button"
+                >
+                  Completed With Changes
+                </button>
+                <button className="rounded-lg bg-[#b8f36b] px-3 py-2 text-[10px] font-semibold text-[#102010]" onClick={() => markWorkoutComplete(detailedWorkout)} type="button">
+                  Mark Complete
+                </button>
+                <button className="rounded-lg border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]" onClick={skipTodaysWorkout} type="button">
+                  Skip Workout
+                </button>
+              </>
+            )}
+            <button className="rounded-lg border border-white/[0.08] px-3 py-2 text-[10px] text-[#a6b1a9]" onClick={() => setWorkoutDetailsOpen(false)} type="button">
+              Close
+            </button>
+          </div>
+        </section>
+      </div>
+    )}
+    </>
   );
 }

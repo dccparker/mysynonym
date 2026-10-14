@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Check, Clock3, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { CalendarDays, Check, Clock3, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import {
   normalizeAvailableTrainingDays,
@@ -45,6 +45,20 @@ function displayDuration(minutes: number): string {
   if (hours === 0) return `${remainingMinutes} min`;
   if (remainingMinutes === 0) return `${hours} hr`;
   return `${hours} hr ${remainingMinutes} min`;
+}
+
+function displayEffort(intensity: PlannedIntensity): string {
+  const description =
+    intensity === "Recovery"
+      ? "Very light, comfortable movement."
+      : intensity === "Easy"
+        ? "Comfortable conversation pace."
+        : intensity === "Moderate"
+          ? "Steady and controlled; stay in control throughout."
+          : intensity === "Hard"
+            ? "Challenging but controlled, with easier recovery between efforts."
+            : "Rest or very light movement.";
+  return `${intensity} — ${description}`;
 }
 
 function PlannedWorkoutForm({
@@ -91,10 +105,23 @@ function PlannedWorkoutForm({
       date: dateForPlanDay(localDateString(startOfWeek(new Date())), plannedDay),
       title: title.trim() || activities.map((activity) => activity.activityType).join(" + "),
       notes: notes.trim(),
-      reason: reason.trim(),
-      activities,
+      reason:
+        reason.trim() ||
+        "Supports the athlete's training goal within the available training time.",
+      activities: activities.map((activity) => ({
+        ...activity,
+        instructions:
+          activity.instructions.trim() ||
+          "Keep the effort controlled and adjust the session to stay comfortable.",
+        purpose:
+          activity.purpose.trim() ||
+          "Support consistent progress toward the training goal.",
+      })),
       status: initial?.status === "Skipped" ? "Skipped" : "Planned",
       ...(initial?.matchedSessionId ? { matchedSessionId: initial.matchedSessionId } : {}),
+      ...(initial?.rescheduledFromDay
+        ? { rescheduledFromDay: initial.rescheduledFromDay }
+        : {}),
       ...(initial?.autoMatchDisabled ? { autoMatchDisabled: true } : {}),
       ...(initial?.generated ? { generated: true } : {}),
     });
@@ -329,6 +356,9 @@ export function WeeklyTrainingPlan() {
   const [generationExplanation, setGenerationExplanation] = useState("");
   const [proposalIndex, setProposalIndex] = useState(0);
   const [proposalNotice, setProposalNotice] = useState("");
+  const [showRescheduleOptions, setShowRescheduleOptions] = useState(false);
+  const [movingSessionId, setMovingSessionId] = useState("");
+  const [moveToDay, setMoveToDay] = useState<PlannedSession["day"] | "">("");
   const [generationError, setGenerationError] = useState("");
   const [incompleteProfile, setIncompleteProfile] = useState(false);
   const [storageError, setStorageError] = useState("");
@@ -495,6 +525,41 @@ export function WeeklyTrainingPlan() {
       })),
     [schedulableCurrentWeekPlans],
   );
+  const rescheduleSuggestions = useMemo(() => {
+    const missedSessions = currentWeekPlans.filter((session) => session.status === "Missed");
+    return missedSessions.map((session) => {
+      const duration = plannedSessionDuration(session);
+      const options = availableTrainingDays
+        .filter((day) => {
+          const date = dateForPlanDay(weekStart, day);
+          if (date < today) return false;
+          if (completedSessions.some((completed) => completed.date === date)) return false;
+          const alreadyPlannedMinutes = currentWeekPlans
+            .filter(
+              (planned) =>
+                planned.id !== session.id &&
+                planned.date === date &&
+                planned.status !== "Skipped",
+            )
+            .reduce((sum, planned) => sum + plannedSessionDuration(planned), 0);
+          const isWeekend = day === "Saturday" || day === "Sunday";
+          const dailyLimit = isWeekend
+            ? profile?.maxWeekendWorkoutMinutes ?? 180
+            : profile?.maxWeekdayWorkoutMinutes ?? 120;
+          return alreadyPlannedMinutes + duration <= dailyLimit;
+        })
+        .slice(0, 2);
+      return { session, options };
+    });
+  }, [
+    availableTrainingDays,
+    completedSessions,
+    currentWeekPlans,
+    profile?.maxWeekdayWorkoutMinutes,
+    profile?.maxWeekendWorkoutMinutes,
+    today,
+    weekStart,
+  ]);
 
   const adherence = useMemo(() => {
     const completed = schedulableCurrentWeekPlans.filter((session) => session.status === "Completed").length;
@@ -531,13 +596,15 @@ export function WeeklyTrainingPlan() {
     const plannedMinutes = schedulableCurrentWeekPlans
       .filter((session) => session.status !== "Skipped")
       .reduce((total, session) => total + plannedSessionDuration(session), 0);
-    const longestWorkout = schedulableCurrentWeekPlans.reduce<PlannedSession | null>(
+    const longestWorkout = schedulableCurrentWeekPlans
+      .filter((session) => session.status !== "Skipped")
+      .reduce<PlannedSession | null>(
       (longest, session) =>
         !longest || plannedSessionDuration(session) > plannedSessionDuration(longest)
           ? session
           : longest,
       null,
-    );
+      );
     const hoursByDay = weekDays.map((day) => ({
       day,
       minutes: schedulableCurrentWeekPlans
@@ -561,6 +628,8 @@ export function WeeklyTrainingPlan() {
       }
       setPlannedSessions(next);
       setEditing(null);
+      setMovingSessionId("");
+      setMoveToDay("");
       setStorageError("");
       setFeedback(success);
       notifyTrainingPlanUpdated();
@@ -686,6 +755,67 @@ export function WeeklyTrainingPlan() {
     );
   }
 
+  function isMeaningfullyDifferent(
+    previous: PlannedSession[],
+    next: PlannedSession[],
+  ): boolean {
+    const weekSessions = (sessions: PlannedSession[]) =>
+      sessions.filter((session) => session.date >= weekStart && session.date <= weekEnd);
+    const previousWeek = weekSessions(previous);
+    const nextWeek = weekSessions(next);
+    if (previousWeek.length !== nextWeek.length) return true;
+    const activitiesByDate = (sessions: PlannedSession[]) =>
+      new Map(
+        sessions.map((session) => [
+          session.date,
+          session.activities.map((activity) => activity.activityType).sort().join("+"),
+        ]),
+      );
+    const previousActivities = activitiesByDate(previousWeek);
+    const nextActivities = activitiesByDate(nextWeek);
+    if (
+      [...new Set([...previousActivities.keys(), ...nextActivities.keys()])].some(
+        (date) => previousActivities.get(date) !== nextActivities.get(date),
+      )
+    ) {
+      return true;
+    }
+    const totalMinutes = (sessions: PlannedSession[]) =>
+      sessions.reduce((sum, session) => sum + plannedSessionDuration(session), 0);
+    const previousMinutes = totalMinutes(previousWeek);
+    const nextMinutes = totalMinutes(nextWeek);
+    return Math.abs(previousMinutes - nextMinutes) >= Math.max(15, previousMinutes * 0.1);
+  }
+
+  function describeProposalChanges(
+    previous: PlannedSession[],
+    next: PlannedSession[],
+  ): string {
+    const byDay = (sessions: PlannedSession[]) =>
+      new Map(
+        sessions
+          .filter((session) => session.date >= weekStart && session.date <= weekEnd)
+          .map((session) => [
+            session.day,
+            `${session.title} (${session.activities.map((activity) => activity.activityType).join(" + ")}, ${displayDuration(plannedSessionDuration(session))})`,
+          ]),
+      );
+    const previousByDay = byDay(previous);
+    const nextByDay = byDay(next);
+    const changes = weekDays
+      .filter((day) => previousByDay.get(day) !== nextByDay.get(day))
+      .map(
+        (day) =>
+          `${day}: ${previousByDay.get(day) ?? "rest"} → ${nextByDay.get(day) ?? "rest"}`,
+      );
+    return changes.slice(0, 3).join("; ") ||
+      `Weekly volume changed from ${displayDuration(
+        previous.reduce((sum, session) => sum + plannedSessionDuration(session), 0),
+      )} to ${displayDuration(
+        next.reduce((sum, session) => sum + plannedSessionDuration(session), 0),
+      )}.`;
+  }
+
   function generateWeek() {
     setFeedback("");
     setStorageError("");
@@ -718,16 +848,21 @@ export function WeeklyTrainingPlan() {
     const previousSignature = proposalSignature(reviewSessions);
     setGenerationError("");
     try {
-      for (let offset = 1; offset <= 12; offset += 1) {
+      for (let offset = 1; offset <= 84; offset += 1) {
         const nextIndex = proposalIndex + offset;
         const generated = createProposal(nextIndex);
         if (!generated) return;
-        if (proposalSignature(generated.sessions) === previousSignature) continue;
+        if (
+          proposalSignature(generated.sessions) === previousSignature ||
+          !isMeaningfullyDifferent(reviewSessions, generated.sessions)
+        ) continue;
         setReviewSessions(generated.sessions);
         setStarterWeek(generated.starterWeek);
         setGenerationExplanation(generated.explanation);
         setProposalIndex(nextIndex);
-        setProposalNotice(`Alternative proposal ${nextIndex + 1} created. Review the updated schedule before saving.`);
+        setProposalNotice(
+          `Alternative proposal ${nextIndex + 1} created. Changes: ${describeProposalChanges(reviewSessions, generated.sessions)}.`,
+        );
         return;
       }
       setProposalNotice("No reasonable alternative was found with the current availability and profile. Your proposal is unchanged.");
@@ -781,6 +916,57 @@ export function WeeklyTrainingPlan() {
           : item,
       ),
       status === "Skipped" ? "Planned session skipped." : "Planned session restored.",
+    );
+  }
+
+  function moveWorkout(session: PlannedSession, targetDay: PlannedSession["day"]) {
+    if (session.status === "Completed") {
+      setStorageError("Completed workouts cannot be moved. Completed training history is unchanged.");
+      return;
+    }
+    if (!availableTrainingDays.includes(targetDay)) {
+      setStorageError("Choose an available training day before moving this workout.");
+      return;
+    }
+    if (targetDay === session.day) return;
+    const targetDate = dateForPlanDay(weekStart, targetDay);
+    if (targetDate < today) {
+      setStorageError("Move this workout to today or a later available day.");
+      return;
+    }
+    const longestScheduledDuration = currentWeekPlans
+      .filter((item) => item.status !== "Skipped")
+      .reduce(
+        (longest, item) => Math.max(longest, plannedSessionDuration(item)),
+        0,
+      );
+    if (
+      session.day === profile?.longWorkoutDay &&
+      plannedSessionDuration(session) >= longestScheduledDuration
+    ) {
+      const shouldMove = window.confirm(
+        "This workout is currently your week's long workout and is scheduled on your preferred long-workout day. Are you sure you want to move it?",
+      );
+      if (!shouldMove) return;
+    }
+    const originalDay = session.rescheduledFromDay ?? session.day;
+    persist(
+      plannedSessions.map((item) =>
+        item.id === session.id
+          ? {
+              ...item,
+              day: targetDay,
+              date: targetDate,
+              status: "Planned",
+              ...(targetDay === originalDay
+                ? { rescheduledFromDay: undefined }
+                : { rescheduledFromDay: originalDay }),
+              matchedSessionId: undefined,
+              updatedAt: new Date().toISOString(),
+            }
+          : item,
+      ),
+      `${session.title} moved from ${session.day} to ${targetDay}.`,
     );
   }
 
@@ -886,6 +1072,19 @@ export function WeeklyTrainingPlan() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
+            className={`inline-flex min-h-9 items-center gap-1.5 rounded-lg border px-3 py-2 text-[10px] font-medium ${
+              showRescheduleOptions
+                ? "border-[#b8f36b]/30 text-[#c5ef97]"
+                : "border-white/[0.09] text-[#a6b1a9] hover:border-[#b8f36b]/25 hover:text-[#c5ef97]"
+            }`}
+            disabled={!isLoaded || !isWorkoutHistoryLoaded}
+            onClick={() => setShowRescheduleOptions((visible) => !visible)}
+            type="button"
+          >
+            <CalendarDays aria-hidden="true" size={13} />
+            Reschedule Week
+          </button>
+          <button
             className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-[#b8f36b] px-3.5 py-2 text-xs font-semibold text-[#102010] hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!isLoaded || !isWorkoutHistoryLoaded || Boolean(historyError)}
             onClick={generateWeek}
@@ -927,6 +1126,66 @@ export function WeeklyTrainingPlan() {
         <div className="mt-3 rounded-lg border border-[#f0b47c]/20 bg-[#f0b47c]/[0.06] p-3 text-xs text-[#f0c49d]" role="status">
           {unavailableCurrentWeekPlans.length} saved session{unavailableCurrentWeekPlans.length === 1 ? " is" : "s are"} on a day not currently selected as available. They are excluded from this week&apos;s schedule; edit and move them to an available day.
         </div>
+      )}
+      {showRescheduleOptions && (
+        <section
+          aria-labelledby="reschedule-week-heading"
+          className="mt-4 rounded-lg border border-[#8dd7e5]/15 bg-[#0b100e] p-4"
+        >
+          <h3 className="text-sm font-semibold text-[#dce4dd]" id="reschedule-week-heading">
+            Reschedule missed workouts
+          </h3>
+          <p className="mt-1 text-[10px] leading-relaxed text-[#87938b]">
+            Choose an available open day for a missed session, or skip it. Moving sessions keeps weekly volume unchanged and will not add extra workouts.
+          </p>
+          {rescheduleSuggestions.length > 0 ? (
+            <ul className="mt-3 grid gap-2">
+              {rescheduleSuggestions.map(({ session, options }) => (
+                <li
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/[0.07] bg-[#111714] p-3"
+                  key={session.id}
+                >
+                  <div>
+                    <p className="text-xs font-semibold text-[#dce4dd]">
+                      Missed {session.day} {session.title}
+                    </p>
+                    <p className="mt-1 text-[10px] text-[#87938b]">
+                      {displayDuration(plannedSessionDuration(session))} · {session.activities.map((activity) => activity.activityType).join(" + ")}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {options.map((day) => (
+                      <button
+                        className="rounded-md border border-[#8dd7e5]/20 px-2.5 py-1.5 text-[10px] text-[#b9e5eb] hover:bg-[#8dd7e5]/[0.06]"
+                        key={day}
+                        onClick={() => moveWorkout(session, day)}
+                        type="button"
+                      >
+                        Move to {day}
+                      </button>
+                    ))}
+                    <button
+                      className="rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-[#a6b1a9] hover:text-white"
+                      onClick={() => setPlannedStatus(session, "Skipped")}
+                      type="button"
+                    >
+                      Skip this workout
+                    </button>
+                  </div>
+                  {options.length === 0 && (
+                    <p className="w-full text-[10px] text-[#f0c49d]">
+                      No available open day fits this session without exceeding a daily workout limit.
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-[10px] text-[#78857d]">
+              No missed workouts need rescheduling this week.
+            </p>
+          )}
+        </section>
       )}
       {reviewSessions && (
         <section className="mt-4 rounded-lg border border-[#b8f36b]/20 bg-[#0b100e] p-4" aria-labelledby="review-week-heading">
@@ -1003,15 +1262,22 @@ export function WeeklyTrainingPlan() {
                     {session.activities.map((activity) => (
                       <div className="mt-2" key={activity.id}>
                         <p className="text-[10px] text-[#a6b1a9]">
-                          {activity.activityType} · {displayDuration(activity.durationMinutes)} · {activity.intensity}
+                          {activity.activityType} · {displayDuration(activity.durationMinutes)}
                         </p>
-                        <p className="mt-1 text-[9px] leading-relaxed text-[#87938b]">{activity.instructions}</p>
-                        <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">{activity.purpose}</p>
+                        <p className="mt-1 text-[9px] leading-relaxed text-[#87938b]">
+                          <span className="font-semibold">Expected effort:</span> {displayEffort(activity.intensity)}
+                        </p>
+                        <p className="mt-1 text-[9px] leading-relaxed text-[#87938b]">
+                          <span className="font-semibold">Plain-language explanation:</span> {activity.instructions}
+                        </p>
+                        <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">
+                          <span className="font-semibold">Purpose:</span> {activity.purpose}
+                        </p>
                       </div>
                     ))}
                     {session.reason && (
                       <p className="mt-2 border-t border-white/[0.06] pt-2 text-[10px] leading-relaxed text-[#c5ef97]">
-                        <span className="font-semibold">Reason:</span> {session.reason}
+                        <span className="font-semibold">Why this workout:</span> {session.reason}
                       </p>
                     )}
                   </li>
@@ -1107,10 +1373,17 @@ export function WeeklyTrainingPlan() {
                         {workout.activities.map((activity) => (
                           <div className="min-w-0 rounded-md border border-white/[0.05] bg-[#0b100e]/60 p-2" key={activity.id}>
                             <p className="text-[10px] font-medium text-[#dce4dd]">
-                              {activity.activityType} · {displayDuration(activity.durationMinutes)} · {activity.intensity}
+                              {activity.activityType} · {displayDuration(activity.durationMinutes)}
                             </p>
-                            <p className="mt-1 break-words text-[9px] leading-relaxed text-[#87938b]">{activity.instructions}</p>
-                            <p className="mt-1 break-words text-[9px] leading-relaxed text-[#78857d]">{activity.purpose}</p>
+                            <p className="mt-1 break-words text-[9px] leading-relaxed text-[#87938b]">
+                              <span className="font-semibold">Expected effort:</span> {displayEffort(activity.intensity)}
+                            </p>
+                            <p className="mt-1 break-words text-[9px] leading-relaxed text-[#87938b]">
+                              <span className="font-semibold">Plain-language explanation:</span> {activity.instructions}
+                            </p>
+                            <p className="mt-1 break-words text-[9px] leading-relaxed text-[#78857d]">
+                              <span className="font-semibold">Purpose:</span> {activity.purpose}
+                            </p>
                           </div>
                         ))}
                       </div>
@@ -1121,7 +1394,12 @@ export function WeeklyTrainingPlan() {
                       )}
                       {workout.reason && (
                         <p className="mt-2 break-words text-[10px] leading-relaxed text-[#c5ef97]">
-                          <span className="font-semibold">Reason:</span> {workout.reason}
+                          <span className="font-semibold">Why this workout:</span> {workout.reason}
+                        </p>
+                      )}
+                      {workout.rescheduledFromDay && (
+                        <p className="mt-2 text-[9px] text-[#b9e5eb]">
+                          Moved from {workout.rescheduledFromDay} to {workout.day}.
                         </p>
                       )}
                       {workout.matchedSessionId && (
@@ -1151,6 +1429,63 @@ export function WeeklyTrainingPlan() {
                         </select>
                       </label>
                       <div className="mt-3 flex flex-wrap gap-1 border-t border-white/[0.06] pt-2">
+                        {workout.status !== "Completed" && (
+                          <>
+                            <button
+                              aria-expanded={movingSessionId === workout.id}
+                              aria-label={`Move ${workout.title} to another day`}
+                              className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[9px] text-[#b9e5eb] hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]"
+                              onClick={() => {
+                                const isOpen = movingSessionId === workout.id;
+                                setMovingSessionId(isOpen ? "" : workout.id);
+                                setMoveToDay("");
+                              }}
+                              type="button"
+                            >
+                              <CalendarDays aria-hidden="true" size={10} /> Move Workout
+                            </button>
+                            {movingSessionId === workout.id && (
+                              <div className="mt-1 flex w-full flex-wrap items-center gap-2">
+                                <label className="sr-only" htmlFor={`move-day-${workout.id}`}>
+                                  Move {workout.title} to day
+                                </label>
+                                <select
+                                  className={`${inputClass} min-h-8 max-w-40 text-[10px]`}
+                                  id={`move-day-${workout.id}`}
+                                  onChange={(event) =>
+                                    setMoveToDay(
+                                      weekDays.find((day) => day === event.currentTarget.value) ?? "",
+                                    )
+                                  }
+                                  value={moveToDay}
+                                >
+                                  <option value="">Select an available day</option>
+                                  {availableTrainingDays
+                                    .filter(
+                                      (targetDay) =>
+                                        targetDay !== workout.day &&
+                                        dateForPlanDay(weekStart, targetDay) >= today,
+                                    )
+                                    .map((targetDay) => (
+                                      <option key={targetDay} value={targetDay}>
+                                        {targetDay}
+                                      </option>
+                                    ))}
+                                </select>
+                                <button
+                                  className="rounded-md bg-[#8dd7e5]/10 px-2.5 py-1.5 text-[9px] font-medium text-[#b9e5eb] disabled:cursor-not-allowed disabled:opacity-50"
+                                  disabled={!moveToDay}
+                                  onClick={() => {
+                                    if (moveToDay) moveWorkout(workout, moveToDay);
+                                  }}
+                                  type="button"
+                                >
+                                  Move to selected day
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        )}
                         <button
                           aria-label={`Edit ${workout.title} planned for ${day}`}
                           className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[9px] text-[#c5ef97] hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]"

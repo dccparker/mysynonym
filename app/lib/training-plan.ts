@@ -29,6 +29,8 @@ export type PlannedSession = {
   reason: string;
   activities: PlannedActivity[];
   status: PlannedStatus;
+  rescheduledFromDay?: (typeof weekDays)[number];
+  modified?: boolean;
   matchedSessionId?: string;
   autoMatchDisabled?: boolean;
   createdAt: string;
@@ -92,8 +94,14 @@ function normalizeActivity(value: unknown): PlannedActivity | null {
       ? { distance: value.distance }
       : {}),
     intensity,
-    instructions: typeof value.instructions === "string" ? value.instructions : "",
-    purpose: typeof value.purpose === "string" ? value.purpose : "",
+    instructions:
+      typeof value.instructions === "string" && value.instructions.trim()
+        ? value.instructions
+        : "Keep the effort controlled and adjust the session to stay comfortable.",
+    purpose:
+      typeof value.purpose === "string" && value.purpose.trim()
+        ? value.purpose
+        : "Support consistent progress toward the training goal.",
   };
 }
 
@@ -117,8 +125,8 @@ export function normalizePlannedSession(value: unknown): PlannedSession | null {
             activityType: value.workoutType as PlannedActivityType,
             durationMinutes: value.durationMinutes,
             intensity: "Easy" as const,
-            instructions: "",
-            purpose: "",
+            instructions: "Keep the effort controlled and adjust the session to stay comfortable.",
+            purpose: "Support consistent progress toward the training goal.",
           },
         ]
       : null;
@@ -129,6 +137,7 @@ export function normalizePlannedSession(value: unknown): PlannedSession | null {
     typeof value.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.date)
       ? value.date
       : dateForPlanDay(localDateString(startOfWeek(new Date())), day);
+  const rescheduledFromDay = weekDays.find((item) => item === value.rescheduledFromDay);
   return {
     id: value.id,
     day,
@@ -140,9 +149,14 @@ export function normalizePlannedSession(value: unknown): PlannedSession | null {
           ? value.workoutType
           : "Training session",
     notes: typeof value.notes === "string" ? value.notes : "",
-    reason: typeof value.reason === "string" ? value.reason : "",
+    reason:
+      typeof value.reason === "string" && value.reason.trim()
+        ? value.reason
+        : "Supports the athlete's training goal within the available training time.",
     activities: activities as PlannedActivity[],
     status: statuses.find((status) => status === value.status) ?? "Planned",
+    ...(rescheduledFromDay ? { rescheduledFromDay } : {}),
+    ...(value.modified === true ? { modified: true } : {}),
     ...(typeof value.matchedSessionId === "string"
       ? { matchedSessionId: value.matchedSessionId }
       : {}),
@@ -331,7 +345,10 @@ function goalTypes(profile: AthleteProfile, available: PlannedActivityType[]): P
   const disliked = new Set(profile.dislikedActivities.map((activity) => dislikedMap[activity]));
   const supported = target.filter(
     (activity): activity is PlannedActivityType =>
-      available.includes(activity as PlannedActivityType) && !disliked.has(activity as PlannedActivityType),
+      available.includes(activity as PlannedActivityType) &&
+      (isTriathlonGoal && ["Swim", "Ride", "Run"].includes(activity)
+        ? true
+        : !disliked.has(activity as PlannedActivityType)),
   );
   const preferredOrder = new Map(preferred.map((activity, index) => [activity, index]));
   return [...new Set(supported)].sort((left, right) => {
@@ -410,6 +427,13 @@ function generateTrainingWeekProposal(
   const recentHistory = history.filter(
     (session) => session.date >= recentStartString && session.date <= today,
   );
+  const previousWeekStart = new Date(startOfWeek(now));
+  previousWeekStart.setDate(previousWeekStart.getDate() - 7);
+  const previousWeekStartString = localDateString(previousWeekStart);
+  const previousWeekEnd = dateForPlanDay(
+    previousWeekStartString,
+    "Sunday",
+  );
   const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(profile.targetEventDate)
     ? new Date(`${profile.targetEventDate}T00:00:00`)
     : null;
@@ -417,17 +441,31 @@ function generateTrainingWeekProposal(
     ? Math.ceil((targetDate.getTime() - new Date(`${today}T00:00:00`).getTime()) / 86_400_000)
     : null;
   const eventIsNear = daysToTarget !== null && daysToTarget >= 0 && daysToTarget <= 14;
-  const starterWeek = recentHistory.length === 0;
   const recentMinutes = recentHistory.reduce(
     (sum, session) => sum + session.activities.reduce((total, activity) => total + activity.duration, 0),
     0,
   );
+  const previousWeekMinutes = history
+    .filter(
+      (session) =>
+        session.date >= previousWeekStartString && session.date <= previousWeekEnd,
+    )
+    .reduce(
+      (sum, session) =>
+        sum + session.activities.reduce((total, activity) => total + activity.duration, 0),
+      0,
+    );
+  const starterWeek = recentHistory.length === 0 && previousWeekMinutes === 0;
   const weekLimit = (profile.weeklyTrainingHours ?? 0) * 60;
+  const minimumDuration = profile.trainingExperience === "Beginner" ? 20 : 30;
+  const recentBaseline = Math.max(recentMinutes, previousWeekMinutes);
   const desiredWeeklyMinutes = Math.max(
     0,
     Math.min(
       weekLimit,
-      (starterWeek ? weekLimit * 0.65 : Math.max(recentMinutes, weekLimit * 0.65)) *
+      (starterWeek
+        ? weekLimit * 0.65
+        : Math.min(weekLimit, Math.max(minimumDuration, recentBaseline * 1.1))) *
         (eventIsNear ? 0.7 : 1),
     ),
   );
@@ -488,10 +526,43 @@ function generateTrainingWeekProposal(
       );
     },
   );
-  const minimumDuration = profile.trainingExperience === "Beginner" ? 20 : 30;
+  const historyTypeSequence = [...types].sort(
+    (left, right) =>
+      (usedMinutesByType.get(left) ?? 0) - (usedMinutesByType.get(right) ?? 0) ||
+      (lastDateByType.get(left) ?? "").localeCompare(lastDateByType.get(right) ?? ""),
+  );
   const isTriathlonGoal = ["Ironman", "Half Ironman", "Triathlon"].includes(profile.primaryGoal);
-  const desiredTriathlonSessions =
-    isTriathlonGoal && targetMinutes >= 150 && eligibleDays.length >= 5 ? 5 : 3;
+  const triathlonCore = historyTypeSequence.filter((type) =>
+    ["Swim", "Ride", "Run"].includes(type),
+  );
+  if (isTriathlonGoal && triathlonCore.length === 0) {
+    return {
+      sessions: remaining,
+      starterWeek,
+      explanation:
+        "A swim, ride, or run activity is needed for a triathlon-focused week; current equipment does not support any of these sessions, so strength is not scheduled as a substitute.",
+    };
+  }
+  const includeSupportingStrength =
+    isTriathlonGoal &&
+    triathlonCore.length > 0 &&
+    types.includes("Strength") &&
+    eligibleDays.length > triathlonCore.length &&
+    targetMinutes >= minimumDuration * (triathlonCore.length + 1);
+  const includeRecoverySession =
+    isTriathlonGoal &&
+    eligibleDays.length >= 5 &&
+    targetMinutes >=
+      minimumDuration *
+        (triathlonCore.length + (includeSupportingStrength ? 1 : 0) + 1);
+  const desiredTriathlonSessions = isTriathlonGoal
+    ? Math.min(
+        eligibleDays.length,
+        triathlonCore.length +
+          (includeSupportingStrength ? 1 : 0) +
+          (includeRecoverySession ? 1 : 0),
+      )
+    : 0;
   const sessionCount = Math.min(
     eligibleDays.length,
     Math.max(
@@ -534,19 +605,6 @@ function generateTrainingWeekProposal(
   );
   const totalWeight = days.reduce((sum, day) => sum + (day === longDay ? 1.8 : 1), 0);
   const baseMinutes = variantTargetMinutes / Math.max(1, totalWeight);
-  const historyTypeSequence = [...types].sort(
-    (left, right) =>
-      (usedMinutesByType.get(left) ?? 0) - (usedMinutesByType.get(right) ?? 0) ||
-      (lastDateByType.get(left) ?? "").localeCompare(lastDateByType.get(right) ?? ""),
-  );
-  const triathlonCore = historyTypeSequence.filter((type) =>
-    ["Swim", "Ride", "Run"].includes(type),
-  );
-  const longDayUsesBrick =
-    isTriathlonGoal &&
-    days.length <= 3 &&
-    types.includes("Ride") &&
-    types.includes("Run");
   const longDayActivityType =
     (isTriathlonGoal || profile.primaryGoal === "Cycling Event") && types.includes("Ride")
       ? "Ride"
@@ -554,9 +612,7 @@ function generateTrainingWeekProposal(
         ? "Run"
         : historyTypeSequence[0];
   const nonLongTriathlonTypes = triathlonCore.filter(
-    (type) =>
-      type !== longDayActivityType &&
-      !(longDayUsesBrick && type === "Run"),
+    (type) => type !== longDayActivityType,
   );
   const triathlonRotation = nonLongTriathlonTypes.length
     ? variationIndex % nonLongTriathlonTypes.length
@@ -565,13 +621,19 @@ function generateTrainingWeekProposal(
     ...nonLongTriathlonTypes.slice(triathlonRotation),
     ...nonLongTriathlonTypes.slice(0, triathlonRotation),
   ];
-  const nonLongTypes = isTriathlonGoal
-    ? [
-        ...rotatedTriathlonTypes,
-        ...(historyTypeSequence.includes("Strength") ? ["Strength" as const] : []),
-      ]
-    : historyTypeSequence;
-  const strengthAssigned = isTriathlonGoal && days.length >= 3 && types.includes("Strength");
+  const nonLongTypes = isTriathlonGoal ? rotatedTriathlonTypes : historyTypeSequence;
+  const strengthSessionIndex =
+    includeSupportingStrength && days.length > triathlonCore.length
+      ? includeRecoverySession
+        ? days.length - 2
+        : days.length - 1
+      : -1;
+  const recoverySessionIndex =
+    includeRecoverySession && days.length > triathlonCore.length
+      ? days.length - 1
+      : !includeSupportingStrength && isTriathlonGoal && days.length > triathlonCore.length
+        ? days.length - 1
+        : -1;
   let nonLongActivityIndex = 0;
   const longDayIsWeekend = longDay === "Saturday" || longDay === "Sunday";
   const longSessionCap = Math.min(
@@ -586,7 +648,7 @@ function generateTrainingWeekProposal(
   );
   const generatedSessions = days.map((day, index) => {
     const isLongDay = day === longDay;
-    const isRecoverySession = isTriathlonGoal && days.length >= 5 && index === days.length - 1;
+    const isRecoverySession = index === recoverySessionIndex;
     const weekend = day === "Saturday" || day === "Sunday";
     const durationCap =
       weekend
@@ -619,8 +681,7 @@ function generateTrainingWeekProposal(
       activityType = "Run";
     } else if (
       isTriathlonGoal &&
-      strengthAssigned &&
-      index === (days.length >= 5 ? days.length - 2 : days.length - 1)
+      index === strengthSessionIndex
     ) {
       activityType = "Strength";
     } else if (isRecoverySession) {
@@ -633,9 +694,9 @@ function generateTrainingWeekProposal(
     const shouldAddBrick =
       isTriathlonGoal &&
       isLongDay &&
-      types.includes("Ride") &&
+      activityType === "Ride" &&
       types.includes("Run") &&
-      (longDayUsesBrick || variationIndex % 3 === 0);
+      variationIndex % 3 === 0;
     const recentSameActivityCount = recentHistory.filter((session) =>
       session.activities.some((activity) => activity.activityType === activityType),
     ).length;
@@ -646,7 +707,9 @@ function generateTrainingWeekProposal(
         : recentSameActivityCount >= 3 && !isLongDay
           ? "Recovery"
           : isLongDay
-            ? "Moderate"
+            ? profile.trainingExperience === "Beginner"
+              ? "Easy"
+              : "Moderate"
             : "Easy";
     const mainDuration = shouldAddBrick
       ? Math.max(1, Math.floor((durationMinutes * 0.8) / 5) * 5)
@@ -776,6 +839,7 @@ function generateTrainingWeekProposal(
     starterWeek,
     explanation:
       `Plan uses ${recentHistory.length} completed sessions from the previous seven days (${(recentMinutes / 60).toFixed(1)} hours), ` +
+      `${(previousWeekMinutes / 60).toFixed(1)} hours completed in the previous calendar week, ` +
       `${completedThisWeekMinutes} minutes already completed this week, ${profile.weeklyTrainingHours ?? 0} available weekly hours, ` +
       `${missedThisWeek} missed planned session${missedThisWeek === 1 ? "" : "s"} this week, ` +
       `the stated goal, selected training days, equipment, experience, and activity preferences` +

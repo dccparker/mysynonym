@@ -2,8 +2,8 @@
 
 import {
   ArrowRight,
-  ArrowUpRight,
   Bell,
+  Bike,
   CalendarDays,
   Check,
   ChevronRight,
@@ -11,16 +11,13 @@ import {
   Clock3,
   Footprints,
   Heart,
-  HeartPulse,
-  Moon,
   Sparkles,
   Target,
   Utensils,
   Waves,
-  Zap,
-  type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
   formatTargetEvent,
   isAthleteProfileComplete,
@@ -28,6 +25,15 @@ import {
   type AthleteProfile,
 } from "./lib/athlete-profile";
 import { TodaysDecision } from "./components/todays-decision";
+import { DailyRecoveryCheckIn } from "./components/daily-recovery-check-in";
+import {
+  localDateString,
+  normalizeTrainingPlan,
+  plannedSessionDuration,
+  TRAINING_PLAN_STORAGE_KEY,
+  TRAINING_PLAN_UPDATED_EVENT,
+  type PlannedSession,
+} from "./lib/training-plan";
 
 const weekDays = [
   { label: "Mon", fullName: "Monday" },
@@ -68,102 +74,6 @@ function SectionHeading({
         </a>
       )}
     </div>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  unit,
-  note,
-  icon: Icon,
-  tone = "green",
-  id,
-}: {
-  label: string;
-  value: string;
-  unit?: string;
-  note: string;
-  icon: LucideIcon;
-  tone?: "green" | "blue" | "orange";
-  id?: string;
-}) {
-  const tones = {
-    green: "text-[#b8f36b] bg-[#b8f36b]/10",
-    blue: "text-[#8dd7e5] bg-[#8dd7e5]/10",
-    orange: "text-[#f0b47c] bg-[#f0b47c]/10",
-  };
-
-  return (
-    <article
-      id={id}
-      className="min-w-0 rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5"
-    >
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-medium text-[#99a49d]">{label}</p>
-        <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${tones[tone]}`}>
-          <Icon size={16} strokeWidth={1.8} />
-        </span>
-      </div>
-      <div className="mt-5 flex items-baseline gap-1.5">
-        <span className="text-[27px] font-semibold leading-none tracking-[-0.04em] text-[#f2f5f1]">
-          {value}
-        </span>
-        {unit && <span className="text-xs text-[#849088]">{unit}</span>}
-      </div>
-      <p className="mt-2.5 flex items-center gap-1.5 text-[10px] text-[#829087]">
-        <ArrowUpRight size={12} className="text-[#b8f36b]" />
-        {note}
-      </p>
-    </article>
-  );
-}
-
-function ReadinessCard() {
-  return (
-    <article
-      className="flex min-h-[228px] flex-col justify-between overflow-hidden rounded-lg border border-[#b8f36b]/15 p-5 sm:p-6"
-      style={{
-        background:
-          "radial-gradient(ellipse at 10% 0%, rgba(184,243,107,0.12), transparent 48%), #111714",
-      }}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-medium text-[#aeb9b1]">Readiness score</p>
-          <p className="mt-1 text-[11px] text-[#78857c]">Recovery indicators suggest you&apos;re ready to absorb quality training.</p>
-        </div>
-        <span className="flex items-center gap-1.5 rounded-full border border-[#b8f36b]/15 bg-[#b8f36b]/[0.07] px-2.5 py-1 text-[10px] font-medium text-[#c5ef97]">
-          <span className="size-1.5 rounded-full bg-[#b8f36b]" />
-          Optimal
-        </span>
-      </div>
-      <div className="mt-5 flex items-center gap-5 sm:gap-6">
-        <div
-          aria-label="Readiness score 82 out of 100"
-          className="size-[112px] shrink-0 rounded-full p-[7px]"
-          role="img"
-          style={{
-            background:
-              "conic-gradient(#b8f36b 0deg 295deg, rgba(255,255,255,0.08) 295deg 360deg)",
-          }}
-        >
-          <div className="flex size-full flex-col items-center justify-center rounded-full bg-[#111714]">
-            <span className="text-[35px] font-semibold leading-none tracking-[-0.06em] text-white">82</span>
-            <span className="mt-1 text-[9px] font-medium uppercase tracking-[0.12em] text-[#829087]">of 100</span>
-          </div>
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-[#d8e2d9]">
-            <Zap size={14} className="text-[#b8f36b]" />
-            Ready to Train
-          </div>
-          <p className="mt-2 max-w-[200px] text-[11px] leading-[1.6] text-[#89958c]">
-            Sleep, HRV, and resting heart rate are all trending in the right direction. Today&apos;s aerobic work should be well tolerated.
-          </p>
-        </div>
-      </div>
-    </article>
   );
 }
 
@@ -308,28 +218,100 @@ function GoalCard({ profile }: { profile: AthleteProfile | null }) {
 }
 
 function WorkoutCard() {
+  const [sessions, setSessions] = useState<PlannedSession[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [today, setToday] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    const loadPlan = () => {
+      try {
+        const stored = window.localStorage.getItem(TRAINING_PLAN_STORAGE_KEY);
+        if (stored === null) {
+          setSessions([]);
+        } else {
+          const normalized = normalizeTrainingPlan(JSON.parse(stored));
+          if (!normalized) throw new Error("The saved training plan has an invalid format.");
+          setSessions(normalized);
+        }
+        setLoadError("");
+      } catch {
+        setSessions([]);
+        setLoadError("The upcoming workout could not be loaded from your training plan.");
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+    const timeout = window.setTimeout(() => {
+      setToday(localDateString(new Date()));
+      loadPlan();
+    }, 0);
+    window.addEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlan);
+    window.addEventListener("storage", loadPlan);
+    return () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlan);
+      window.removeEventListener("storage", loadPlan);
+    };
+  }, []);
+
+  const upcoming = sessions
+    .filter(
+      (session) =>
+        session.date >= today &&
+        session.status === "Planned",
+    )
+    .sort((left, right) => left.date.localeCompare(right.date))[0];
+  const upcomingActivity = upcoming?.activities[0]?.activityType ?? "Run";
+  const upcomingIcon =
+    upcomingActivity === "Swim" ? Waves : upcomingActivity === "Ride" ? Bike : Footprints;
+  const UpcomingIcon = upcomingIcon;
+  const upcomingDate = upcoming
+    ? new Date(`${upcoming.date}T00:00:00`).toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      })
+    : "";
+
   return (
     <article className="rounded-lg border border-white/[0.07] bg-[#111714] p-5 sm:p-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-medium text-[#a6b1a9]">Next session</p>
-          <h3 className="mt-2 text-[18px] font-semibold tracking-[-0.025em] text-[#eef2ed]">Aerobic foundation run</h3>
+          <p className="text-xs font-medium text-[#a6b1a9]">Next planned session</p>
+          <h3 className="mt-2 text-[18px] font-semibold tracking-[-0.025em] text-[#eef2ed]">
+            {!isLoaded
+              ? "Loading plan…"
+              : loadError
+                ? "Plan unavailable"
+                : upcoming?.title ?? "No upcoming workout"}
+          </h3>
         </div>
         <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[#f0b47c]/10 text-[#f0b47c]">
-          <Footprints size={17} />
+          <UpcomingIcon size={17} />
         </span>
       </div>
       <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-[10px] text-[#8a968e]">
-        <span className="flex items-center gap-1.5"><CalendarDays size={13} /> Mon, Oct 12</span>
-        <span className="flex items-center gap-1.5"><Clock3 size={13} /> 6:30 AM · 60 min</span>
-        <span className="flex items-center gap-1.5"><Heart size={13} /> Zone 2 · 135–150 bpm</span>
+        {upcoming && (
+          <>
+            <span className="flex items-center gap-1.5"><CalendarDays size={13} /> {upcoming.day}, {upcomingDate}</span>
+            <span className="flex items-center gap-1.5"><Clock3 size={13} /> {plannedSessionDuration(upcoming)} min</span>
+            <span className="flex items-center gap-1.5"><Heart size={13} /> {upcoming.activities.map((activity) => activity.intensity).join(" · ")}</span>
+          </>
+        )}
       </div>
       <div className="mt-5 flex items-center justify-between border-t border-white/[0.07] pt-4">
         <p className="max-w-[330px] text-[11px] leading-relaxed text-[#869289]">
-          Keep it conversational. Finish with 4 × 20-second relaxed strides if your legs feel good.
+          {loadError
+            ? loadError
+            : upcoming
+            ? upcoming.rescheduledFromDay
+              ? `Moved from ${upcoming.rescheduledFromDay}. ${upcoming.reason}`
+              : upcoming.reason
+            : "Generate a week in the Training Planner to see your next planned workout here."}
         </p>
         <a
-          aria-label="View workout details"
+          aria-label="View training plan"
           className="ml-3 flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad] transition-colors hover:border-[#b8f36b]/30 hover:text-[#c5ef97]"
           href="#training"
         >
@@ -377,16 +359,6 @@ function NutritionCard() {
         <span className="text-[#8c9890]">Carbs <strong className="ml-1 font-medium text-[#d9e0da]">206g</strong></span>
       </div>
     </article>
-  );
-}
-
-function RecoverySummary() {
-  return (
-    <section id="recovery" aria-label="Recovery metrics" className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      <MetricCard label="Sleep" value="7h 42m" note="+38 min vs. 30-day avg" icon={Moon} />
-      <MetricCard label="HRV" value="68" unit="ms" note="+5 ms vs. baseline" icon={HeartPulse} tone="blue" />
-      <MetricCard label="Resting heart rate" value="49" unit="bpm" note="2 bpm below baseline" icon={Heart} tone="orange" />
-    </section>
   );
 }
 
@@ -447,11 +419,8 @@ export default function Home() {
 
           <TodaysDecision />
 
-          <div id="dashboard" className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-            <div className="xl:col-span-5"><ReadinessCard /></div>
-            <div className="xl:col-span-7">
-              <RecoverySummary />
-            </div>
+          <div id="dashboard" className="mt-5">
+            <DailyRecoveryCheckIn />
           </div>
 
           <div className="mt-8 grid grid-cols-1 gap-3 lg:grid-cols-12">
