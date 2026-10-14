@@ -6,6 +6,7 @@ import {
   Dumbbell,
   HeartPulse,
   LayoutDashboard,
+  LogOut,
   Settings2,
   Sparkles,
   Utensils,
@@ -13,9 +14,10 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useState, type ReactNode } from "react";
 import { calculateAge, formatTargetEvent, useAthleteProfile } from "../lib/athlete-profile";
+import { supabase } from "../lib/supabase";
 
 type NavigationItem = {
   label: string;
@@ -87,7 +89,15 @@ function NavigationLinks({ mobile = false }: { mobile?: boolean }) {
   );
 }
 
-function Sidebar() {
+function Sidebar({
+  onSignOut,
+  isSigningOut,
+  signOutError,
+}: {
+  onSignOut: () => void;
+  isSigningOut: boolean;
+  signOutError: string;
+}) {
   const { profile } = useAthleteProfile();
   const age = profile ? calculateAge(profile.dateOfBirth) : null;
   const weight = profile?.weightKg === null || profile?.weightKg === undefined
@@ -141,30 +151,98 @@ function Sidebar() {
           </span>
           <ChevronRight size={15} className="text-[#69766e]" />
         </Link>
+        <button
+          className="mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-medium text-[#8b9790] transition-colors hover:bg-[#171e1a] hover:text-[#e8eee9] disabled:cursor-wait disabled:opacity-60"
+          disabled={isSigningOut}
+          onClick={onSignOut}
+          type="button"
+        >
+          <LogOut aria-hidden="true" size={16} />
+          {isSigningOut ? "Signing out…" : "Sign out"}
+        </button>
+        {signOutError && (
+          <p className="mt-2 px-3 text-[10px] leading-4 text-red-300" role="alert">
+            {signOutError}
+          </p>
+        )}
       </div>
     </aside>
   );
 }
 
 export function DashboardShell({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
+
+  if (pathname === "/login" || pathname === "/signup") {
+    return children;
+  }
+
+  async function handleSignOut() {
+    setIsSigningOut(true);
+    setSignOutError("");
+
+    try {
+      const { error } = await supabase.auth.signOut();
+
+      if (error) {
+        setSignOutError(error.message);
+        return;
+      }
+
+      router.replace("/login");
+      router.refresh();
+    } catch (signOutFailure) {
+      setSignOutError(
+        signOutFailure instanceof Error
+          ? signOutFailure.message
+          : "We couldn't sign you out. Please try again.",
+      );
+    } finally {
+      setIsSigningOut(false);
+    }
+  }
+
   return (
     <main className="flex min-h-screen bg-[#090d0b] text-[#eef2ed]">
-      <Sidebar />
+      <Sidebar
+        isSigningOut={isSigningOut}
+        onSignOut={handleSignOut}
+        signOutError={signOutError}
+      />
       <div className="min-w-0 flex-1">
         <header className="border-b border-white/[0.07] bg-[#0b100e]/95 px-4 py-3 lg:hidden">
           <div className="flex items-center justify-between gap-4">
             <Brand />
-            <button
-              aria-label="Notifications"
-              className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad]"
-              type="button"
-            >
-              <Bell size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                aria-label="Notifications"
+                className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad]"
+                type="button"
+              >
+                <Bell size={16} />
+              </button>
+              <button
+                aria-label="Sign out"
+                className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad] transition-colors hover:border-white/[0.16] hover:text-[#e8eee9] disabled:cursor-wait disabled:opacity-60"
+                disabled={isSigningOut}
+                onClick={handleSignOut}
+                type="button"
+              >
+                <LogOut aria-hidden="true" size={16} />
+              </button>
+            </div>
           </div>
           <div className="mt-3 overflow-x-auto pb-0.5 [scrollbar-width:none]">
             <NavigationLinks mobile />
           </div>
+          {signOutError && (
+            <p className="mt-2 text-xs leading-5 text-red-300" role="alert">
+              {signOutError}
+            </p>
+          )}
         </header>
         {children}
       </div>
