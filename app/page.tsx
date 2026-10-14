@@ -1,5 +1,6 @@
+"use client";
+
 import {
-  Activity,
   ArrowRight,
   ArrowUpRight,
   Bell,
@@ -8,13 +9,10 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
-  Dumbbell,
   Footprints,
   Heart,
   HeartPulse,
-  LayoutDashboard,
   Moon,
-  Settings2,
   Sparkles,
   Target,
   Utensils,
@@ -22,125 +20,24 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
+import Link from "next/link";
+import {
+  formatTargetEvent,
+  isAthleteProfileComplete,
+  useAthleteProfile,
+  type AthleteProfile,
+} from "./lib/athlete-profile";
+import { TodaysDecision } from "./components/todays-decision";
 
-type NavigationItem = {
-  label: string;
-  href: string;
-  icon: LucideIcon;
-};
-
-const navigation: NavigationItem[] = [
-  { label: "Dashboard", href: "#dashboard", icon: LayoutDashboard },
-  { label: "Training", href: "#training", icon: Dumbbell },
-  { label: "Recovery", href: "#recovery", icon: HeartPulse },
-  { label: "Nutrition", href: "#nutrition", icon: Utensils },
-  { label: "AI Coach", href: "#coach", icon: Sparkles },
+const weekDays = [
+  { label: "Mon", fullName: "Monday" },
+  { label: "Tue", fullName: "Tuesday" },
+  { label: "Wed", fullName: "Wednesday" },
+  { label: "Thu", fullName: "Thursday" },
+  { label: "Fri", fullName: "Friday" },
+  { label: "Sat", fullName: "Saturday" },
+  { label: "Sun", fullName: "Sunday" },
 ];
-
-const weeklyTraining = [
-  { day: "Mon", hours: 1.5 },
-  { day: "Tue", hours: 0 },
-  { day: "Wed", hours: 2.1 },
-  { day: "Thu", hours: 1.25 },
-  { day: "Fri", hours: 0.9 },
-  { day: "Sat", hours: 1.05 },
-  { day: "Sun", hours: 1.2 },
-];
-
-function Brand() {
-  return (
-    <a className="flex items-center gap-3" href="#dashboard" aria-label="MySynonym home">
-      <span className="flex size-9 items-center justify-center rounded-xl bg-[#b8f36b] text-[#102010]">
-        <Activity size={19} strokeWidth={2.5} />
-      </span>
-      <span className="text-[17px] font-semibold tracking-[-0.02em] text-white">
-        my<span className="text-[#b8f36b]">synonym</span>
-      </span>
-    </a>
-  );
-}
-
-function NavigationLinks({ mobile = false }: { mobile?: boolean }) {
-  return (
-    <nav
-      aria-label={mobile ? "Mobile navigation" : "Main navigation"}
-      className={mobile ? "flex min-w-max items-center gap-1" : "grid gap-1"}
-    >
-      {navigation.map(({ label, href, icon: Icon }, index) => (
-        <a
-          key={label}
-          aria-current={index === 0 ? "page" : undefined}
-          className={`group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors ${
-            mobile ? "shrink-0" : ""
-          } ${
-            index === 0
-              ? "bg-[#1b2520] text-[#c2f680]"
-              : "text-[#8b9790] hover:bg-[#171e1a] hover:text-[#e8eee9]"
-          }`}
-          href={href}
-        >
-          <Icon size={17} strokeWidth={1.8} />
-          {label}
-          {label === "AI Coach" && !mobile && (
-            <span className="ml-auto rounded bg-[#b8f36b]/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#b8f36b]">
-              New
-            </span>
-          )}
-        </a>
-      ))}
-      <a
-        className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium text-[#8b9790] transition-colors hover:bg-[#171e1a] hover:text-[#e8eee9] ${
-          mobile ? "shrink-0" : ""
-        }`}
-        href="#settings"
-      >
-        <Settings2 size={17} strokeWidth={1.8} />
-        Settings
-      </a>
-    </nav>
-  );
-}
-
-function Sidebar() {
-  return (
-    <aside className="sticky top-0 hidden h-screen w-[244px] shrink-0 flex-col border-r border-white/[0.07] bg-[#0b100e] px-4 py-6 lg:flex">
-      <div className="px-2">
-        <Brand />
-      </div>
-      <div className="mt-10 px-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#56625b]">
-        Workspace
-      </div>
-      <div className="mt-3">
-        <NavigationLinks />
-      </div>
-      <div className="mt-auto">
-        <div className="mb-4 rounded-lg border border-white/[0.07] bg-[#111714] p-3.5">
-          <div className="flex items-center justify-between text-[11px] text-[#87938b]">
-            <span>Ironman build</span>
-            <span className="text-[#dce4dd]">42%</span>
-          </div>
-          <div className="mt-3 h-1 overflow-hidden rounded-full bg-[#26312b]">
-            <div className="h-full w-[42%] rounded-full bg-[#b8f36b]" />
-          </div>
-          <p className="mt-2.5 text-[10px] text-[#69766e]">Base phase · Week 6 of 14</p>
-        </div>
-        <a
-          className="flex items-center gap-3 rounded-lg p-2.5 transition-colors hover:bg-[#171e1a]"
-          href="#settings"
-        >
-          <span className="flex size-9 items-center justify-center rounded-full border border-[#607263] bg-[#29362d] text-xs font-semibold text-[#d7e7d8]">
-            JM
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-xs font-medium text-[#e5ebe6]">Jordan Miller</span>
-            <span className="mt-0.5 block text-[10px] text-[#77837b]">Age 31 · 195 lb</span>
-          </span>
-          <ChevronRight size={15} className="text-[#69766e]" />
-        </a>
-      </div>
-    </aside>
-  );
-}
 
 function SectionHeading({
   eyebrow,
@@ -234,7 +131,7 @@ function ReadinessCard() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium text-[#aeb9b1]">Readiness score</p>
-          <p className="mt-1 text-[11px] text-[#78857c]">Your body is ready to work</p>
+          <p className="mt-1 text-[11px] text-[#78857c]">Recovery indicators suggest you&apos;re ready to absorb quality training.</p>
         </div>
         <span className="flex items-center gap-1.5 rounded-full border border-[#b8f36b]/15 bg-[#b8f36b]/[0.07] px-2.5 py-1 text-[10px] font-medium text-[#c5ef97]">
           <span className="size-1.5 rounded-full bg-[#b8f36b]" />
@@ -259,10 +156,10 @@ function ReadinessCard() {
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-medium text-[#d8e2d9]">
             <Zap size={14} className="text-[#b8f36b]" />
-            Strong recovery
+            Ready to Train
           </div>
           <p className="mt-2 max-w-[200px] text-[11px] leading-[1.6] text-[#89958c]">
-            Solid sleep and a calm resting heart rate put you in a good spot for today&apos;s work.
+            Sleep, HRV, and resting heart rate are all trending in the right direction. Today&apos;s aerobic work should be well tolerated.
           </p>
         </div>
       </div>
@@ -270,52 +167,75 @@ function ReadinessCard() {
   );
 }
 
-function WeeklyProgress() {
+function WeeklyProgress({ profile }: { profile: AthleteProfile | null }) {
+  const availableDays = profile?.availableTrainingDays ?? [];
+  const weeklyHours = profile?.weeklyTrainingHours;
   return (
     <article id="training" className="rounded-lg border border-white/[0.07] bg-[#111714] p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-medium text-[#a6b1a9]">Training volume</p>
+          <p className="text-xs font-medium text-[#a6b1a9]">Weekly availability</p>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-[30px] font-semibold leading-none tracking-[-0.05em] text-[#f1f4f0]">8.0</span>
-            <span className="text-xs text-[#849088]">/ 10 hrs</span>
+            <span className="text-[30px] font-semibold leading-none tracking-[-0.05em] text-[#f1f4f0]">
+              {weeklyHours ?? "—"}
+            </span>
+            <span className="text-xs text-[#849088]">{weeklyHours === null || weeklyHours === undefined ? "hours not set" : "hours per week"}</span>
           </div>
         </div>
         <div className="rounded-md border border-white/[0.07] bg-[#171e1a] px-2.5 py-1.5 text-[10px] text-[#a2ada5]">
-          This week <ChevronRight size={12} className="ml-1 inline" />
+          {availableDays.length} available {availableDays.length === 1 ? "day" : "days"}
+          <ChevronRight size={12} className="ml-1 inline" />
         </div>
       </div>
       <div className="mt-5 flex items-center gap-2 text-[10px] text-[#7f8c83]">
         <span className="size-1.5 rounded-full bg-[#b8f36b]" />
-        80% of weekly target
-        <span className="ml-auto text-[#68756d]">Goal: 10 hrs</span>
+        {profile
+          ? profile.longWorkoutDay
+            ? `Long workout: ${profile.longWorkoutDay}`
+            : "Long workout day not set"
+          : "Complete your athlete profile to personalize MySynonym."}
       </div>
       <div
-        aria-label="Weekly training hours: Monday 1.5, Tuesday 0, Wednesday 2.1, Thursday 1.25, Friday 0.9, Saturday 1.05, Sunday 1.2"
+        aria-label={`Available training days: ${availableDays.length ? availableDays.join(", ") : "not set"}`}
         className="mt-4 grid h-[116px] grid-cols-7 items-end gap-2 sm:gap-3"
         role="img"
       >
-        {weeklyTraining.map(({ day, hours }) => (
-          <div key={day} className="flex h-full flex-col items-center justify-end gap-2">
-            <div className="flex h-[91px] w-full items-end overflow-hidden rounded-[3px] bg-[#1c2520]">
-              {hours > 0 && (
-                <div
-                  className={`w-full rounded-[3px] ${day === "Sun" ? "bg-[#d0f79d]" : "bg-[#769c52]"}`}
-                  style={{ height: `${(hours / 2.5) * 100}%` }}
-                />
-              )}
+        {weekDays.map(({ label, fullName }) => {
+          const isAvailable = availableDays.includes(fullName);
+          return (
+            <div key={label} className="flex h-full flex-col items-center justify-end gap-2">
+              <div className="flex h-[91px] w-full items-end overflow-hidden rounded-[3px] bg-[#1c2520]">
+                {isAvailable && (
+                  <div
+                    className={`w-full rounded-[3px] ${profile?.longWorkoutDay === fullName ? "bg-[#d0f79d]" : "bg-[#769c52]"}`}
+                    style={{ height: profile?.longWorkoutDay === fullName ? "100%" : "65%" }}
+                  />
+                )}
+              </div>
+              <span className={`text-[9px] ${isAvailable ? "font-semibold text-[#d4e9ba]" : "text-[#758178]"}`}>
+                {label}
+              </span>
             </div>
-            <span className={`text-[9px] ${day === "Sun" ? "font-semibold text-[#d4e9ba]" : "text-[#758178]"}`}>
-              {day}
-            </span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </article>
   );
 }
 
-function GoalCard() {
+function GoalCard({ profile }: { profile: AthleteProfile | null }) {
+  const profileComplete = isAthleteProfileComplete(profile);
+  const targetEvent = profile ? formatTargetEvent(profile) : "Not set";
+  const weeklyAvailability = profile?.weeklyTrainingHours !== null && profile?.weeklyTrainingHours !== undefined
+    ? `${profile.weeklyTrainingHours} hours per week`
+    : "Not set";
+  const primaryGoal =
+    profile?.primaryGoal === "Custom"
+      ? profile.customGoalName || "Custom goal"
+      : profile?.primaryGoal || "Goal not set";
+  const availableEquipment = profile
+    ? [...profile.equipment, profile.otherEquipment].filter(Boolean)
+    : [];
   return (
     <article className="rounded-lg border border-white/[0.07] bg-[#111714] p-5 sm:p-6">
       <div className="flex items-center justify-between gap-3">
@@ -324,23 +244,64 @@ function GoalCard() {
           <Target size={16} />
         </span>
       </div>
-      <h3 className="mt-4 text-[21px] font-semibold tracking-[-0.03em] text-[#f0f4ef]">Ironman 2027</h3>
-      <p className="mt-1 text-[11px] text-[#849088]">Build the engine. Trust the process.</p>
+      {!profileComplete && (
+        <p className="mt-3 text-[11px] leading-relaxed text-[#f0c49d]">
+          Complete your athlete profile to personalize MySynonym.{" "}
+          <Link className="font-medium text-[#c5ef97] hover:text-[#d0f79d]" href="/settings">
+            Complete profile
+          </Link>
+        </p>
+      )}
+      <h3 className="mt-4 text-[21px] font-semibold tracking-[-0.03em] text-[#f0f4ef]">
+        {primaryGoal}
+      </h3>
+      <p className="mt-1 text-[11px] text-[#849088]">
+        {profile?.goalDescription || "Your primary goal"}
+      </p>
       <div className="mt-5 grid grid-cols-2 gap-3 border-y border-white/[0.07] py-4">
         <div>
-          <p className="text-[10px] text-[#78857d]">Weekly volume</p>
-          <p className="mt-1 text-sm font-medium text-[#dce4dd]">8 hours</p>
+          <p className="text-[10px] text-[#78857d]">Training experience</p>
+          <p className="mt-1 text-sm font-medium text-[#dce4dd]">
+            {profile?.trainingExperience || "Not set"}
+          </p>
         </div>
         <div>
-          <p className="text-[10px] text-[#78857d]">Training phase</p>
-          <p className="mt-1 text-sm font-medium text-[#dce4dd]">Base · Week 6</p>
+          <p className="text-[10px] text-[#78857d]">Available training hours</p>
+          <p className="mt-1 text-sm font-medium text-[#dce4dd]">{weeklyAvailability}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-[#78857d]">Preferred name</p>
+          <p className="mt-1 text-xs font-medium text-[#dce4dd]">{profile?.preferredName || "Not set"}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-[#78857d]">Target event</p>
+          <p className="mt-1 text-xs font-medium text-[#dce4dd]">{targetEvent}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-[#78857d]">Available training days</p>
+          <p className="mt-1 text-xs font-medium text-[#dce4dd]">
+            {profile?.availableTrainingDays.join(", ") || "Not set"}
+          </p>
+        </div>
+        <div>
+          <p className="text-[10px] text-[#78857d]">Long workout day</p>
+          <p className="mt-1 text-xs font-medium text-[#dce4dd]">{profile?.longWorkoutDay || "Not set"}</p>
+        </div>
+        <div>
+          <p className="text-[10px] text-[#78857d]">Available equipment</p>
+          <p className="mt-1 text-xs leading-relaxed text-[#dce4dd]">
+            {availableEquipment.length ? availableEquipment.join(", ") : "Not set"}
+          </p>
         </div>
       </div>
       <div className="mt-4 flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-[10px] text-[#7e8a82]">
-          <CalendarDays size={13} /> Race season 2027
+          <CalendarDays size={13} />
+          Preferred units · {profile?.units || (profile ? "Not set" : "—")}
         </span>
-        <span className="text-[10px] font-medium text-[#b8f36b]">On track</span>
+        <Link className="text-[10px] font-medium text-[#b8f36b] hover:text-[#d0f79d]" href="/settings">
+          Edit profile
+        </Link>
       </div>
     </article>
   );
@@ -387,7 +348,7 @@ function CoachCard() {
         <p className="text-[10px] font-semibold uppercase tracking-[0.12em]">Coach&apos;s note</p>
       </div>
       <p className="mt-4 text-[13px] font-medium leading-relaxed text-[#e5ebe6]">
-        You&apos;re absorbing the work well. Keep tomorrow&apos;s run easy and let consistency do its thing.
+        Recovery remains strong. The fastest path forward is steady execution, not extra intensity.
       </p>
       <div className="mt-4 flex items-center justify-between border-t border-white/[0.07] pt-3 text-[10px] text-[#78857d]">
         <span>Based on your last 7 days</span>
@@ -430,39 +391,49 @@ function RecoverySummary() {
 }
 
 export default function Home() {
+  const { profile, isProfileLoaded, profileError } = useAthleteProfile();
   return (
-    <main className="flex min-h-screen bg-[#090d0b] text-[#eef2ed]">
-      <Sidebar />
-      <div className="min-w-0 flex-1">
-        <header className="border-b border-white/[0.07] bg-[#0b100e]/95 px-4 py-3 lg:hidden">
-          <div className="flex items-center justify-between gap-4">
-            <Brand />
-            <button
-              aria-label="Notifications"
-              className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad]"
-              type="button"
-            >
-              <Bell size={16} />
-            </button>
-          </div>
-          <div className="mt-3 overflow-x-auto pb-0.5 [scrollbar-width:none]">
-            <NavigationLinks mobile />
-          </div>
-        </header>
-
-        <div className="mx-auto w-full max-w-[1480px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8">
+    <div className="mx-auto w-full max-w-[1480px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8">
           <header className="mb-7 flex flex-wrap items-end justify-between gap-4">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#839087]">Sunday, October 11</p>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#839087]">Athlete dashboard</p>
               <h1 className="mt-2 text-[25px] font-semibold tracking-[-0.04em] text-[#f1f4f0] sm:text-[29px]">
-                Good morning, Jordan<span className="text-[#b8f36b]">.</span>
+                {profile?.preferredName
+                  ? `Good morning, ${profile.preferredName}`
+                  : "Your dashboard"}
+                <span className="text-[#b8f36b]">.</span>
               </h1>
-              <p className="mt-1.5 text-xs text-[#87938b]">A clear read on your training, recovery, and what comes next.</p>
+              <p className="mt-1.5 text-xs text-[#87938b]">Your training data, translated into today&apos;s decisions.</p>
+              {isProfileLoaded && !profile && (
+                <Link className="mt-1 inline-block text-[10px] text-[#b8f36b] hover:text-[#d0f79d]" href="/settings">
+                  Complete your athlete profile to personalize MySynonym.
+                </Link>
+              )}
+              {isProfileLoaded && profile && (
+                <p className="mt-1 text-[10px] text-[#87938b]">
+                  {profile.primaryGoal === "Custom"
+                    ? profile.customGoalName || "Custom goal"
+                    : profile.primaryGoal || "Goal not set"}
+                  {profile.targetEventName ? ` · ${profile.targetEventName}` : ""}
+                  {profile.targetEventDate
+                    ? ` · ${new Date(`${profile.targetEventDate}T00:00:00`).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}`
+                    : ""}
+                </p>
+              )}
+              {profileError && (
+                <p className="mt-1 text-[10px] text-[#f0b47c]" role="alert">
+                  {profileError}
+                </p>
+              )}
             </div>
             <div className="hidden items-center gap-3 sm:flex">
               <span className="flex items-center gap-2 rounded-full border border-white/[0.08] bg-[#111714] px-3 py-2 text-[10px] text-[#a4afa7]">
                 <span className="size-1.5 rounded-full bg-[#b8f36b]" />
-                Data updated 7:12 AM
+                {profile ? "Athlete profile" : "Profile not set"}
               </span>
               <button
                 aria-label="Notifications"
@@ -474,21 +445,23 @@ export default function Home() {
             </div>
           </header>
 
+          <TodaysDecision />
+
           <div id="dashboard" className="grid grid-cols-1 gap-3 xl:grid-cols-12">
             <div className="xl:col-span-5"><ReadinessCard /></div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 xl:col-span-7">
+            <div className="xl:col-span-7">
               <RecoverySummary />
             </div>
           </div>
 
           <div className="mt-8 grid grid-cols-1 gap-3 lg:grid-cols-12">
             <section className="lg:col-span-7">
-              <SectionHeading eyebrow="The big picture" title="Weekly progress" action="Training plan" />
-              <WeeklyProgress />
+              <SectionHeading eyebrow="The big picture" title="Training This Week" action="Training plan" />
+              <WeeklyProgress profile={profile} />
             </section>
             <section className="lg:col-span-5">
-              <SectionHeading eyebrow="Your north star" title="Goal & plan" />
-              <GoalCard />
+              <SectionHeading eyebrow="Your north star" title="Current Focus" />
+              <GoalCard profile={profile} />
             </section>
           </div>
 
@@ -504,7 +477,7 @@ export default function Home() {
           </div>
 
           <section className="mt-8" aria-label="Nutrition">
-            <SectionHeading eyebrow="Eat for the work" title="Fuel check-in" />
+            <SectionHeading eyebrow="Eat for the work" title="Nutrition Today" />
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <NutritionCard />
               <article className="flex items-center justify-between gap-5 rounded-lg border border-white/[0.07] bg-[#111714] p-5 sm:px-6">
@@ -521,13 +494,23 @@ export default function Home() {
           </section>
 
           <footer id="settings" className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] py-5 text-[10px] text-[#68756d]">
-            <p>Mock athlete profile · Jordan Miller · Age 31 · 195 lb</p>
-            <a className="inline-flex items-center gap-1.5 transition-colors hover:text-[#b8f36b]" href="#settings">
+            <p>
+              {profile
+                ? [
+                    profile.preferredName,
+                    profile.trainingExperience,
+                    profile.weeklyTrainingHours !== null
+                      ? `${profile.weeklyTrainingHours} available hrs/week`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "Athlete profile"
+                : "Complete your athlete profile to personalize MySynonym."}
+            </p>
+            <Link className="inline-flex items-center gap-1.5 transition-colors hover:text-[#b8f36b]" href="/settings">
               <CircleHelp size={13} /> Profile & settings <ChevronRight size={12} />
-            </a>
+            </Link>
           </footer>
-        </div>
-      </div>
-    </main>
+    </div>
   );
 }
