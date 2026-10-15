@@ -1,7 +1,7 @@
 import type { PlannedSession } from "./training-plan";
 import type { PreferredUnits } from "./athlete-profile";
+import { supabase } from "./supabase";
 
-export const WORKOUT_STORAGE_KEY = "mysynonym-workouts";
 export const WORKOUTS_UPDATED_EVENT = "mysynonym-workouts-updated";
 export const TRAINING_PLAN_STORAGE_KEY = "mysynonym-weekly-training-plan";
 export const TRAINING_PLAN_UPDATED_EVENT = "mysynonym-weekly-training-plan-updated";
@@ -16,6 +16,49 @@ export function notifyWorkoutHistoryUpdated(): void {
 
 export function notifyTrainingPlanUpdated(): void {
   window.dispatchEvent(new Event(TRAINING_PLAN_UPDATED_EVENT));
+}
+
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw error;
+  return data.user?.id ?? null;
+}
+
+async function readWorkoutHistory(userId: string): Promise<unknown[]> {
+  const { data, error } = await supabase
+    .from("workout_histories")
+    .select("workouts")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (data === null) return [];
+  if (!Array.isArray(data.workouts)) {
+    throw new Error("Saved workout history has an invalid format.");
+  }
+  return data.workouts;
+}
+
+async function writeWorkoutHistory(userId: string, workouts: unknown[]): Promise<void> {
+  const { error } = await supabase
+    .from("workout_histories")
+    .upsert(
+      { user_id: userId, workouts, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" },
+    );
+  if (error) throw error;
+}
+
+export async function loadWorkoutHistory(userId?: string | null): Promise<unknown[]> {
+  const resolvedUserId = userId === undefined ? await getAuthenticatedUserId() : userId;
+  if (resolvedUserId === null) return [];
+  return readWorkoutHistory(resolvedUserId);
+}
+
+export async function saveWorkoutHistory(workouts: unknown[]): Promise<void> {
+  const userId = await getAuthenticatedUserId();
+  if (userId === null) throw new Error("Sign in to save your workout history.");
+  await writeWorkoutHistory(userId, workouts);
+  notifyWorkoutHistoryUpdated();
 }
 
 export type CompletedSessionChanges = {
@@ -55,11 +98,11 @@ export function updatePlannedSession(
   notifyTrainingPlanUpdated();
 }
 
-export function completePlannedSession(
+export async function completePlannedSession(
   session: PlannedSession,
   changes?: CompletedSessionChanges,
   preferredUnits: PreferredUnits = "Metric",
-): void {
+): Promise<void> {
   const storedPlan = window.localStorage.getItem(TRAINING_PLAN_STORAGE_KEY);
   if (storedPlan === null) throw new Error("The saved training plan could not be found.");
   const parsedPlan: unknown = JSON.parse(storedPlan);
@@ -72,9 +115,10 @@ export function completePlannedSession(
     throw new Error("This planned workout is no longer available to complete.");
   }
 
-  const storedWorkouts = window.localStorage.getItem(WORKOUT_STORAGE_KEY);
-  const parsedWorkouts: unknown = storedWorkouts === null ? [] : JSON.parse(storedWorkouts);
-  if (!Array.isArray(parsedWorkouts) || parsedWorkouts.some((item) => !isRecord(item))) {
+  const userId = await getAuthenticatedUserId();
+  if (userId === null) throw new Error("Sign in to save your completed workout.");
+  const parsedWorkouts = await readWorkoutHistory(userId);
+  if (parsedWorkouts.some((item) => !isRecord(item))) {
     throw new Error("Saved workout history has an invalid format.");
   }
   const workouts = parsedWorkouts.filter(isRecord);
@@ -226,16 +270,13 @@ export function completePlannedSession(
         }
       : item,
   );
-  const nextWorkouts = JSON.stringify(completedWorkouts);
   const nextPlan = JSON.stringify(updatedPlan);
-
+  await writeWorkoutHistory(userId, completedWorkouts);
   try {
-    window.localStorage.setItem(WORKOUT_STORAGE_KEY, nextWorkouts);
     window.localStorage.setItem(TRAINING_PLAN_STORAGE_KEY, nextPlan);
   } catch (error) {
     try {
-      if (storedWorkouts === null) window.localStorage.removeItem(WORKOUT_STORAGE_KEY);
-      else window.localStorage.setItem(WORKOUT_STORAGE_KEY, storedWorkouts);
+      await writeWorkoutHistory(userId, workouts);
     } catch (rollbackError) {
       throw new Error(
         `Workout completion could not be saved, and the prior history could not be restored: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,

@@ -8,7 +8,8 @@ import {
   useAthleteProfile,
   weekDays,
 } from "../lib/athlete-profile";
-import { WORKOUTS_UPDATED_EVENT, WORKOUT_STORAGE_KEY } from "../lib/workout-storage";
+import { loadWorkoutHistory, WORKOUTS_UPDATED_EVENT } from "../lib/workout-storage";
+import { supabase } from "../lib/supabase";
 import {
   dateForPlanDay,
   findUnavailablePlanDays,
@@ -366,16 +367,12 @@ export function WeeklyTrainingPlan() {
   const [feedback, setFeedback] = useState("");
 
   useEffect(() => {
-    const loadHistory = () => {
+    let active = true;
+    let historyRequestId = 0;
+    const loadHistory = async () => {
+      const currentRequest = ++historyRequestId;
       try {
-        const stored = window.localStorage.getItem(WORKOUT_STORAGE_KEY);
-        if (stored === null) {
-          setCompletedSessions([]);
-          setHistoryError("");
-          setIsWorkoutHistoryLoaded(true);
-          return;
-        }
-        const parsed: unknown = JSON.parse(stored);
+        const parsed = await loadWorkoutHistory();
         if (!Array.isArray(parsed)) throw new Error("Workout history has an invalid format.");
         const grouped = new Map<string, CompletedSession>();
         parsed.forEach((entry, index) => {
@@ -407,13 +404,19 @@ export function WeeklyTrainingPlan() {
           });
           grouped.set(sessionId, session);
         });
+        if (!active || currentRequest !== historyRequestId) return;
         setCompletedSessions([...grouped.values()]);
         setHistoryError("");
-      } catch {
+      } catch (loadError) {
+        if (!active || currentRequest !== historyRequestId) return;
         setCompletedSessions([]);
-        setHistoryError("Saved workouts could not be read, so planned completion status is unavailable.");
+        setHistoryError(
+          loadError instanceof Error
+            ? `Saved workouts could not be read: ${loadError.message}`
+            : "Saved workouts could not be read, so planned completion status is unavailable.",
+        );
       } finally {
-        setIsWorkoutHistoryLoaded(true);
+        if (active && currentRequest === historyRequestId) setIsWorkoutHistoryLoaded(true);
       }
     };
     const loadPlan = () => {
@@ -439,16 +442,25 @@ export function WeeklyTrainingPlan() {
     const timeout = window.setTimeout(() => {
       setToday(localDateString(new Date()));
       loadPlan();
-      loadHistory();
+      void loadHistory();
     }, 0);
     window.addEventListener(WORKOUTS_UPDATED_EVENT, loadHistory);
     window.addEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlan);
     const loadStoredData = (event: StorageEvent) => {
       if (event.key === null || event.key === TRAINING_PLAN_STORAGE_KEY) loadPlan();
-      if (event.key === null || event.key === WORKOUT_STORAGE_KEY) loadHistory();
     };
     window.addEventListener("storage", loadStoredData);
+    const { data } = supabase.auth.onAuthStateChange(() => {
+      queueMicrotask(() => {
+        if (!active) return;
+        setCompletedSessions([]);
+        setIsWorkoutHistoryLoaded(false);
+        void loadHistory();
+      });
+    });
     return () => {
+      active = false;
+      data.subscription.unsubscribe();
       window.clearTimeout(timeout);
       window.removeEventListener(WORKOUTS_UPDATED_EVENT, loadHistory);
       window.removeEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlan);

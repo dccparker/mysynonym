@@ -26,12 +26,12 @@ import {
   type PreferredUnits,
 } from "../lib/athlete-profile";
 import {
-  notifyWorkoutHistoryUpdated,
-  WORKOUT_STORAGE_KEY,
+  loadWorkoutHistory,
+  saveWorkoutHistory,
 } from "../lib/workout-storage";
+import { supabase } from "../lib/supabase";
 import { WeeklyTrainingPlan } from "./weekly-training-plan";
 
-const STORAGE_KEY = WORKOUT_STORAGE_KEY;
 const LEGACY_DATABASE_NAME = "mysynonym-training";
 const LEGACY_SCREENSHOTS_STORE = "workout-screenshots";
 const activities = ["Run", "Ride", "Swim", "Strength", "Other"] as const;
@@ -1534,32 +1534,47 @@ export default function TrainingPage() {
   }, [isCreateSessionOpen, selectedWorkoutId]);
 
   useEffect(() => {
-    const timeout = window.setTimeout(async () => {
+    let active = true;
+    let requestId = 0;
+    const loadWorkouts = async () => {
+      const currentRequest = ++requestId;
       try {
         setToday(localDateString(new Date()));
-        const storedWorkouts = window.localStorage.getItem(STORAGE_KEY);
-        if (storedWorkouts !== null) {
-          const parsed: unknown = JSON.parse(storedWorkouts);
-          if (!Array.isArray(parsed)) {
-            throw new Error("Saved workout data has an invalid format.");
-          }
-          const normalized = parsed.map(normalizeWorkout);
-          const loaded = normalized.filter((workout): workout is Workout => workout !== null);
-          if (loaded.length !== parsed.length) {
-            throw new Error("Saved workout data has an invalid format.");
-          }
-          setWorkouts(loaded);
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(loaded));
+        const parsed = await loadWorkoutHistory();
+        const normalized = parsed.map(normalizeWorkout);
+        const loaded = normalized.filter((workout): workout is Workout => workout !== null);
+        if (loaded.length !== parsed.length) {
+          throw new Error("Saved workout data has an invalid format.");
         }
+        if (!active || currentRequest !== requestId) return;
+        setWorkouts(loaded);
+        setError("");
         await clearLegacyScreenshots();
-      } catch {
-        setError("Saved workouts could not be loaded or secured in this browser.");
+      } catch (loadError) {
+        if (!active || currentRequest !== requestId) return;
+        setError(
+          loadError instanceof Error
+            ? `Saved workouts could not be loaded from Supabase: ${loadError.message}`
+            : "Saved workouts could not be loaded from Supabase.",
+        );
       } finally {
-        setIsLoaded(true);
+        if (active && currentRequest === requestId) setIsLoaded(true);
       }
-    }, 0);
+    };
+    const { data } = supabase.auth.onAuthStateChange(() => {
+      queueMicrotask(() => {
+        if (!active) return;
+        setWorkouts([]);
+        setIsLoaded(false);
+        void loadWorkouts();
+      });
+    });
 
-    return () => window.clearTimeout(timeout);
+    void loadWorkouts();
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -1658,7 +1673,7 @@ export default function TrainingPage() {
     }, 350);
   }
 
-  function persist(nextWorkouts: Workout[]): boolean {
+  async function persist(nextWorkouts: Workout[]): Promise<boolean> {
     try {
       const structuredWorkouts = nextWorkouts.map(normalizeWorkout);
       if (structuredWorkouts.some((workout) => workout === null)) {
@@ -1667,18 +1682,21 @@ export default function TrainingPage() {
       const safeWorkouts = structuredWorkouts.filter(
         (workout): workout is Workout => workout !== null,
       );
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safeWorkouts));
+      await saveWorkoutHistory(safeWorkouts);
       setWorkouts(safeWorkouts);
-      notifyWorkoutHistoryUpdated();
       setError("");
       return true;
-    } catch {
-      setError("Workout could not be saved. Check browser storage and try again.");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? `Workout could not be saved: ${saveError.message}`
+          : "Workout could not be saved due to an unexpected error.",
+      );
       return false;
     }
   }
 
-  function saveTrainingSession(event: FormEvent<HTMLFormElement>) {
+  async function saveTrainingSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSuccessMessage("");
     const form = event.currentTarget;
@@ -1711,7 +1729,7 @@ export default function TrainingPage() {
       };
     });
 
-    if (persist([...sessionActivities, ...workouts])) {
+    if (await persist([...sessionActivities, ...workouts])) {
       clearImage();
       form.reset();
       setIsCreateSessionOpen(false);
@@ -1722,7 +1740,7 @@ export default function TrainingPage() {
     }
   }
 
-  function editWorkout(event: FormEvent<HTMLFormElement>) {
+  async function editWorkout(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSuccessMessage("");
     if (!selectedWorkout) {
@@ -1744,13 +1762,13 @@ export default function TrainingPage() {
           }
         : item,
     );
-    if (persist(sessionUpdated)) {
+    if (await persist(sessionUpdated)) {
       setIsEditing(false);
       setSuccessMessage("Activity and session updated.");
     }
   }
 
-  function addActivityToSelectedSession(formData: FormData) {
+  async function addActivityToSelectedSession(formData: FormData) {
     if (!selectedWorkout) return;
     const activity = readWorkoutForm(formData, undefined, units);
     const nextActivity: Workout = {
@@ -1762,7 +1780,7 @@ export default function TrainingPage() {
       workoutTitle: undefined,
       notes: undefined,
     };
-    if (persist([...workouts, nextActivity])) {
+    if (await persist([...workouts, nextActivity])) {
       setSelectedWorkoutId(nextActivity.id);
       setSuccessMessage("Activity added to training session.");
     }
@@ -1775,7 +1793,7 @@ export default function TrainingPage() {
     setConfirmDelete(true);
   }
 
-  function deleteWorkout() {
+  async function deleteWorkout() {
     setSuccessMessage("");
     if (!selectedWorkout) {
       return;
@@ -1785,7 +1803,7 @@ export default function TrainingPage() {
         ? item.sessionId !== selectedWorkout.sessionId
         : item.id !== selectedWorkout.id,
     );
-    if (persist(remaining)) {
+    if (await persist(remaining)) {
       if (deleteTarget === "session") {
         setSelectedWorkoutId(null);
         setSuccessMessage("Training session deleted.");

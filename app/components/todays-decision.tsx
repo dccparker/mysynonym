@@ -21,11 +21,12 @@ import {
 } from "../lib/athlete-profile";
 import {
   completePlannedSession,
+  loadWorkoutHistory,
   updatePlannedSession,
   WORKOUTS_UPDATED_EVENT,
-  WORKOUT_STORAGE_KEY,
   type CompletedSessionChanges,
 } from "../lib/workout-storage";
+import { supabase } from "../lib/supabase";
 import {
   matchPlannedSessions,
   normalizeTrainingPlan,
@@ -57,6 +58,10 @@ type Workout = {
   sessionTitle?: string;
   startTime?: string;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 type Recommendation = {
   title: string;
@@ -862,7 +867,7 @@ export function TodaysDecision() {
     setShowMoveForm(true);
   }
 
-  function markWorkoutComplete(session: PlannedSession) {
+  async function markWorkoutComplete(session: PlannedSession) {
     setCompletingPlanId(session.id);
     setCompletionError("");
     setCompletionFeedback("");
@@ -871,7 +876,7 @@ export function TodaysDecision() {
         recommendation?.plannedSessionId === session.id && recommendation.activities
           ? { ...session, activities: recommendation.activities }
           : session;
-      completePlannedSession(sessionForCompletion, undefined, profile?.units ?? "Metric");
+      await completePlannedSession(sessionForCompletion, undefined, profile?.units ?? "Metric");
       setCompletionFeedback("Workout marked complete. Your plan, adherence, and training history are updated.");
       setWorkoutDetailsOpen(false);
     } catch (error) {
@@ -885,7 +890,7 @@ export function TodaysDecision() {
     }
   }
 
-  function markWorkoutCompleteWithChanges() {
+  async function markWorkoutCompleteWithChanges() {
     if (!detailedWorkout) return;
     const numeric = (value: string) => (value.trim() ? Number(value) : undefined);
     const statistics = {
@@ -932,7 +937,7 @@ export function TodaysDecision() {
     setCompletingPlanId(detailedWorkout.id);
     setCompletionError("");
     try {
-      completePlannedSession(detailedWorkout, changes, profile?.units ?? "Metric");
+      await completePlannedSession(detailedWorkout, changes, profile?.units ?? "Metric");
       setCompletionFeedback("Workout saved with your changes and linked to Training Sessions.");
       setWorkoutDetailsOpen(false);
       setShowCompletionForm(false);
@@ -958,19 +963,17 @@ export function TodaysDecision() {
   }, [workoutDetailsOpen]);
 
   useEffect(() => {
-    const loadWorkouts = () => {
+    let active = true;
+    let workoutRequestId = 0;
+    const loadWorkouts = async () => {
+      const currentRequest = ++workoutRequestId;
       try {
-        const stored = window.localStorage.getItem(WORKOUT_STORAGE_KEY);
-        if (stored === null) {
-          setWorkouts([]);
-          setHistoryError("");
-          return;
-        }
-        const parsed: unknown = JSON.parse(stored);
+        const parsed = await loadWorkoutHistory();
         if (!Array.isArray(parsed)) throw new Error("Workout history has an invalid format.");
         const safeWorkouts: Workout[] = [];
         for (const [index, item] of parsed.entries()) {
-          if (typeof item !== "object" || item === null || !("activityType" in item) ||
+          if (!isRecord(item) ||
+            !("activityType" in item) ||
             !("workoutDate" in item) || !("duration" in item) ||
             typeof item.activityType !== "string" ||
             typeof item.workoutDate !== "string" ||
@@ -1008,15 +1011,19 @@ export function TodaysDecision() {
               : {}),
           });
         }
+        if (!active || currentRequest !== workoutRequestId) return;
         setWorkouts(safeWorkouts);
         setHistoryError("");
-      } catch {
+      } catch (loadError) {
+        if (!active || currentRequest !== workoutRequestId) return;
         setWorkouts([]);
         setHistoryError(
-          "Saved workout history is unavailable or contains invalid records. Check the saved workout data before generating a history-based recommendation.",
+          loadError instanceof Error
+            ? `Saved workout history is unavailable: ${loadError.message}`
+            : "Saved workout history is unavailable.",
         );
       } finally {
-        setIsWorkoutHistoryLoaded(true);
+        if (active && currentRequest === workoutRequestId) setIsWorkoutHistoryLoaded(true);
       }
     };
     const loadPlanner = () => {
@@ -1056,10 +1063,18 @@ export function TodaysDecision() {
     };
     const updateDate = () => setToday(new Date());
     const loadAll = () => {
-      loadWorkouts();
+      void loadWorkouts();
       loadPlanner();
       loadRecovery();
     };
+    const { data } = supabase.auth.onAuthStateChange(() => {
+      queueMicrotask(() => {
+        if (!active) return;
+        setWorkouts([]);
+        setIsWorkoutHistoryLoaded(false);
+        void loadWorkouts();
+      });
+    });
     loadAll();
     updateDate();
     window.addEventListener("storage", loadAll);
@@ -1069,6 +1084,8 @@ export function TodaysDecision() {
     window.addEventListener("focus", loadAll);
     window.addEventListener("visibilitychange", loadAll);
     return () => {
+      active = false;
+      data.subscription.unsubscribe();
       window.removeEventListener("storage", loadAll);
       window.removeEventListener(WORKOUTS_UPDATED_EVENT, loadWorkouts);
       window.removeEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlanner);
