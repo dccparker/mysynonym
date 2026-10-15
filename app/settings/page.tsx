@@ -120,6 +120,7 @@ export default function SettingsPage() {
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState("");
   const [savedMessage, setSavedMessage] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
   const profile = draftProfile ?? savedProfile ?? emptyAthleteProfile;
   const units = profile.units;
   const totalHeightInches =
@@ -223,19 +224,26 @@ export default function SettingsPage() {
     return errors;
   }
 
-  function handleSave(event: FormEvent<HTMLFormElement>) {
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSavedMessage("");
     const errors = validate();
     setValidationErrors(errors);
     if (Object.keys(errors).length > 0) return;
+    setIsSaving(true);
     try {
-      saveAthleteProfile(profile);
+      await saveAthleteProfile(profile);
       setDraftProfile(null);
       setSaveError("");
       setSavedMessage("Profile saved");
-    } catch {
-      setSaveError("Profile could not be saved. Check browser storage and try again.");
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? `Profile could not be saved: ${error.message}`
+          : "Profile could not be saved due to an unexpected error.",
+      );
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -518,15 +526,15 @@ export default function SettingsPage() {
           <h2 className="text-sm font-semibold text-[#eef2ed]">Privacy and wellbeing</h2>
           <ul className="mt-3 grid gap-2 text-xs leading-relaxed text-[#87938b]">
             <li>Your profile is used to personalize fitness recommendations.</li>
-            <li>Prototype profile data is stored only in this browser and on this device.</li>
+            <li>Your athlete profile is saved to your MySynonym account.</li>
             <li>MySynonym does not currently provide medical diagnosis or medical treatment.</li>
             <li>Seek qualified professional advice for injuries or health concerns.</li>
           </ul>
         </section>
 
         <div className="flex flex-wrap items-center gap-3">
-          <button className="rounded-lg bg-[#b8f36b] px-4 py-2.5 text-xs font-semibold text-[#102010] transition-colors hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b] disabled:cursor-not-allowed disabled:opacity-50" disabled={!isProfileLoaded} type="submit">
-            Save Profile
+          <button className="rounded-lg bg-[#b8f36b] px-4 py-2.5 text-xs font-semibold text-[#102010] transition-colors hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b] disabled:cursor-not-allowed disabled:opacity-50" disabled={!isProfileLoaded || isSaving} type="submit">
+            {isSaving ? "Saving…" : "Save Profile"}
           </button>
           {hasUnsavedChanges && (
             <button className="rounded-lg border border-white/[0.08] px-4 py-2.5 text-xs text-[#a6b1a9] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b]" onClick={cancelChanges} type="button">
@@ -540,7 +548,7 @@ export default function SettingsPage() {
         </div>
       </form>
       <p className="mt-5 text-[10px] text-[#68756d]">
-        Your athlete profile is currently stored only in this browser and on this device.
+        Your athlete profile is saved to your account and available when you sign in.
       </p>
     </div>
   );

@@ -1,9 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
-
-export const ATHLETE_PROFILE_STORAGE_KEY = "mysynonym-athlete-profile";
-const PROFILE_UPDATED_EVENT = "mysynonym-athlete-profile-updated";
+import { supabase } from "./supabase";
 
 export const profileGoals = [
   "Ironman",
@@ -216,7 +214,7 @@ export function formatTargetEvent(profile: AthleteProfile): string {
   return name || date || "Target event not set";
 }
 
-export function saveAthleteProfile(profile: AthleteProfile): void {
+export async function saveAthleteProfile(profile: AthleteProfile): Promise<void> {
   if (
     profile.longWorkoutDay &&
     !normalizeAvailableTrainingDays(profile.availableTrainingDays).includes(
@@ -227,8 +225,29 @@ export function saveAthleteProfile(profile: AthleteProfile): void {
   }
   const normalizedProfile = normalizeAthleteProfile(profile);
   if (!normalizedProfile) throw new Error("Athlete profile has an invalid format.");
-  window.localStorage.setItem(ATHLETE_PROFILE_STORAGE_KEY, JSON.stringify(normalizedProfile));
-  window.dispatchEvent(new Event(PROFILE_UPDATED_EVENT));
+
+  const { data, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!data.user) throw new Error("Sign in to save your athlete profile.");
+
+  const userId = data.user.id;
+  activeProfileUserId = userId;
+  const requestId = ++profileLoadRequestId;
+  const { error } = await supabase
+    .from("profiles")
+    .upsert(
+      { user_id: userId, profile_data: normalizedProfile },
+      { onConflict: "user_id" },
+    );
+  if (error) throw error;
+
+  if (activeProfileUserId === userId && profileLoadRequestId === requestId) {
+    updateProfileSnapshot({
+      profile: normalizedProfile,
+      isProfileLoaded: true,
+      profileError: "",
+    });
+  }
 }
 
 type AthleteProfileSnapshot = {
@@ -246,28 +265,14 @@ const serverSnapshot: AthleteProfileSnapshot = {
 let profileSnapshot = serverSnapshot;
 const profileSubscribers = new Set<() => void>();
 let profileListenersAttached = false;
+let activeProfileUserId: string | null | undefined;
+let profileLoadRequestId = 0;
 
 function notifyProfileSubscribers(): void {
   profileSubscribers.forEach((subscriber) => subscriber());
 }
 
-function loadProfileSnapshot(): void {
-  let nextSnapshot: AthleteProfileSnapshot;
-  try {
-    const stored = window.localStorage.getItem(ATHLETE_PROFILE_STORAGE_KEY);
-    const profile = stored === null ? null : normalizeAthleteProfile(JSON.parse(stored));
-    if (stored !== null && profile === null) {
-      throw new Error("Saved athlete profile has an invalid format.");
-    }
-    nextSnapshot = { profile, isProfileLoaded: true, profileError: "" };
-  } catch {
-    nextSnapshot = {
-      profile: null,
-      isProfileLoaded: true,
-      profileError: "The saved athlete profile could not be loaded from this browser.",
-    };
-  }
-
+function updateProfileSnapshot(nextSnapshot: AthleteProfileSnapshot): void {
   if (
     profileSnapshot.isProfileLoaded === nextSnapshot.isProfileLoaded &&
     profileSnapshot.profileError === nextSnapshot.profileError &&
@@ -279,29 +284,88 @@ function loadProfileSnapshot(): void {
   notifyProfileSubscribers();
 }
 
-function handleProfileStorage(event: StorageEvent): void {
-  if (event.key === null || event.key === ATHLETE_PROFILE_STORAGE_KEY) {
-    loadProfileSnapshot();
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (isRecord(error) && typeof error.message === "string") return error.message;
+  return "An unexpected error occurred.";
+}
+
+async function loadProfileSnapshot(userId?: string | null): Promise<void> {
+  const requestId = ++profileLoadRequestId;
+  try {
+    let resolvedUserId = userId;
+    if (resolvedUserId === undefined) {
+      const { data, error } = await supabase.auth.getUser();
+      if (error) throw error;
+      resolvedUserId = data.user?.id ?? null;
+    }
+
+    if (requestId !== profileLoadRequestId) return;
+    if (activeProfileUserId !== resolvedUserId) {
+      activeProfileUserId = resolvedUserId;
+      updateProfileSnapshot({
+        profile: null,
+        isProfileLoaded: false,
+        profileError: "",
+      });
+    }
+
+    if (resolvedUserId === null) {
+      updateProfileSnapshot({
+        profile: null,
+        isProfileLoaded: true,
+        profileError: "",
+      });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("profile_data")
+      .eq("user_id", resolvedUserId)
+      .maybeSingle();
+    if (error) throw error;
+
+    const profile = data === null ? null : normalizeAthleteProfile(data.profile_data);
+    if (data !== null && profile === null) {
+      throw new Error("The saved athlete profile has an invalid format.");
+    }
+    if (requestId !== profileLoadRequestId) return;
+    updateProfileSnapshot({ profile, isProfileLoaded: true, profileError: "" });
+  } catch (error) {
+    if (requestId !== profileLoadRequestId) return;
+    updateProfileSnapshot({
+      profile: null,
+      isProfileLoaded: true,
+      profileError: `The saved athlete profile could not be loaded from Supabase: ${getErrorMessage(error)}`,
+    });
   }
 }
 
 function subscribeToAthleteProfile(subscriber: () => void): () => void {
   profileSubscribers.add(subscriber);
   if (!profileListenersAttached) {
-    window.addEventListener(PROFILE_UPDATED_EVENT, loadProfileSnapshot);
-    window.addEventListener("storage", handleProfileStorage);
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      const userId = session?.user.id ?? null;
+      queueMicrotask(() => {
+        void loadProfileSnapshot(userId);
+      });
+    });
+    authStateSubscription = data.subscription;
     profileListenersAttached = true;
+    void loadProfileSnapshot();
   }
-  loadProfileSnapshot();
   return () => {
     profileSubscribers.delete(subscriber);
     if (profileSubscribers.size === 0 && profileListenersAttached) {
-      window.removeEventListener(PROFILE_UPDATED_EVENT, loadProfileSnapshot);
-      window.removeEventListener("storage", handleProfileStorage);
+      authStateSubscription?.unsubscribe();
+      authStateSubscription = null;
       profileListenersAttached = false;
     }
   };
 }
+
+let authStateSubscription: { unsubscribe: () => void } | null = null;
 
 export function useAthleteProfile() {
   return useSyncExternalStore(
