@@ -1,4 +1,5 @@
-export const RECOVERY_CHECKINS_STORAGE_KEY = "mysynonym-recovery-checkins";
+import { supabase } from "./supabase";
+
 export const RECOVERY_CHECKINS_UPDATED_EVENT = "mysynonym-recovery-checkins-updated";
 
 export type RecoverySource =
@@ -201,23 +202,52 @@ export function localRecoveryDate(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-export function readRecoveryCheckIns(): RecoveryCheckIn[] {
-  const stored = window.localStorage.getItem(RECOVERY_CHECKINS_STORAGE_KEY);
-  if (stored === null) return [];
-  const parsed: unknown = JSON.parse(stored);
-  const normalized = normalizeRecoveryCheckIns(parsed);
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw error;
+  return data.user?.id ?? null;
+}
+
+export async function loadRecoveryCheckIns(
+  requestedUserId?: string | null,
+): Promise<RecoveryCheckIn[]> {
+  const userId = requestedUserId === undefined
+    ? await getAuthenticatedUserId()
+    : requestedUserId;
+  if (userId === null) return [];
+
+  const { data, error } = await supabase
+    .from("recovery_checkins")
+    .select("check_in")
+    .eq("user_id", userId)
+    .order("check_in_date", { ascending: false });
+  if (error) throw error;
+
+  const normalized = normalizeRecoveryCheckIns(data.map((row) => row.check_in));
   if (!normalized) throw new Error("Saved recovery check-ins have an invalid format.");
   return normalized;
 }
 
-export function saveRecoveryCheckIn(input: RecoveryCheckInInput): RecoveryCheckIn[] {
-  const existing = readRecoveryCheckIns();
-  const previous = existing.find((item) => item.date === input.date);
-  const updated = createRecoveryCheckIn(input, previous?.id);
-  const next = [updated, ...existing.filter((item) => item.date !== input.date)].sort(
-    (left, right) => right.date.localeCompare(left.date),
-  );
-  window.localStorage.setItem(RECOVERY_CHECKINS_STORAGE_KEY, JSON.stringify(next));
+export async function saveRecoveryCheckIn(
+  input: RecoveryCheckInInput,
+): Promise<RecoveryCheckIn> {
+  const userId = await getAuthenticatedUserId();
+  if (userId === null) throw new Error("Sign in to save your recovery check-in.");
+
+  const updated = createRecoveryCheckIn(input);
+  const { error } = await supabase
+    .from("recovery_checkins")
+    .upsert(
+      {
+        user_id: userId,
+        check_in_date: updated.date,
+        check_in: updated,
+        updated_at: updated.updatedAt,
+      },
+      { onConflict: "user_id,check_in_date" },
+    );
+  if (error) throw error;
+
   window.dispatchEvent(new Event(RECOVERY_CHECKINS_UPDATED_EVENT));
-  return next;
+  return updated;
 }

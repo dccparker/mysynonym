@@ -41,7 +41,7 @@ import {
 } from "../lib/training-plan";
 import {
   localRecoveryDate,
-  readRecoveryCheckIns,
+  loadRecoveryCheckIns,
   RECOVERY_CHECKINS_UPDATED_EVENT,
   type RecoveryCheckIn,
 } from "../lib/recovery-checkin";
@@ -965,6 +965,7 @@ export function TodaysDecision() {
   useEffect(() => {
     let active = true;
     let workoutRequestId = 0;
+    let recoveryRequestId = 0;
     const loadWorkouts = async () => {
       const currentRequest = ++workoutRequestId;
       try {
@@ -1046,17 +1047,20 @@ export function TodaysDecision() {
         setIsPlannerLoaded(true);
       }
     };
-    const loadRecovery = () => {
+    const loadRecovery = async (userId?: string | null) => {
+      const currentRequest = ++recoveryRequestId;
       try {
         const todayDate = localRecoveryDate();
-        const records = readRecoveryCheckIns();
+        const records = await loadRecoveryCheckIns(userId);
+        if (!active || currentRequest !== recoveryRequestId) return;
         setRecoveryCheckIn(records.find((record) => record.date === todayDate));
         setRecoveryError("");
-      } catch (error) {
+      } catch (loadError) {
+        if (!active || currentRequest !== recoveryRequestId) return;
         setRecoveryCheckIn(undefined);
         setRecoveryError(
-          error instanceof Error
-            ? error.message
+          loadError instanceof Error
+            ? loadError.message
             : "Saved recovery check-in is unavailable.",
         );
       }
@@ -1065,14 +1069,18 @@ export function TodaysDecision() {
     const loadAll = () => {
       void loadWorkouts();
       loadPlanner();
-      loadRecovery();
+      void loadRecovery();
     };
-    const { data } = supabase.auth.onAuthStateChange(() => {
+    const reloadRecovery = () => void loadRecovery();
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       queueMicrotask(() => {
         if (!active) return;
         setWorkouts([]);
         setIsWorkoutHistoryLoaded(false);
+        setRecoveryCheckIn(undefined);
+        setRecoveryError("");
         void loadWorkouts();
+        void loadRecovery(session?.user.id ?? null);
       });
     });
     loadAll();
@@ -1080,7 +1088,7 @@ export function TodaysDecision() {
     window.addEventListener("storage", loadAll);
     window.addEventListener(WORKOUTS_UPDATED_EVENT, loadWorkouts);
     window.addEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlanner);
-    window.addEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, loadRecovery);
+    window.addEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, reloadRecovery);
     window.addEventListener("focus", loadAll);
     window.addEventListener("visibilitychange", loadAll);
     return () => {
@@ -1089,7 +1097,7 @@ export function TodaysDecision() {
       window.removeEventListener("storage", loadAll);
       window.removeEventListener(WORKOUTS_UPDATED_EVENT, loadWorkouts);
       window.removeEventListener(TRAINING_PLAN_UPDATED_EVENT, loadPlanner);
-      window.removeEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, loadRecovery);
+      window.removeEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, reloadRecovery);
       window.removeEventListener("focus", loadAll);
       window.removeEventListener("visibilitychange", loadAll);
     };

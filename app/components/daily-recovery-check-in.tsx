@@ -4,13 +4,13 @@ import { useEffect, useState, useSyncExternalStore, type FormEvent } from "react
 import { Activity, HeartPulse, Moon, X } from "lucide-react";
 import {
   localRecoveryDate,
-  normalizeRecoveryCheckIns,
-  RECOVERY_CHECKINS_STORAGE_KEY,
   RECOVERY_CHECKINS_UPDATED_EVENT,
+  loadRecoveryCheckIns,
   saveRecoveryCheckIn,
   type RecoveryCheckIn,
   type RecoveryCheckInInput,
 } from "../lib/recovery-checkin";
+import { supabase } from "../lib/supabase";
 
 type Draft = {
   energy: number;
@@ -47,48 +47,6 @@ const emptyDraft: Draft = {
 const fieldClass =
   "min-h-10 w-full rounded-lg border border-white/[0.08] bg-[#0b100e] px-3 text-sm text-[#e5ebe6] outline-none focus:border-[#b8f36b]/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b]";
 const labelClass = "grid gap-1.5 text-[11px] font-medium text-[#a6b1a9]";
-const STORAGE_READ_ERROR = "__recovery_checkin_storage_read_error__";
-
-function subscribeToRecoveryRecords(onChange: () => void): () => void {
-  const onStorage = (event: StorageEvent) => {
-    if (event.key === RECOVERY_CHECKINS_STORAGE_KEY || event.key === null) onChange();
-  };
-  window.addEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, onChange);
-  window.addEventListener("storage", onStorage);
-  return () => {
-    window.removeEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, onChange);
-    window.removeEventListener("storage", onStorage);
-  };
-}
-
-function getRecoveryStorageSnapshot(): string | null {
-  try {
-    return window.localStorage.getItem(RECOVERY_CHECKINS_STORAGE_KEY);
-  } catch {
-    return STORAGE_READ_ERROR;
-  }
-}
-
-function parseRecoveryStorageSnapshot(snapshot: string | null): {
-  records: RecoveryCheckIn[];
-  error: string;
-} {
-  if (snapshot === STORAGE_READ_ERROR) {
-    return { records: [], error: "Recovery check-ins could not be read from browser storage." };
-  }
-  if (snapshot === null) return { records: [], error: "" };
-  try {
-    const parsed: unknown = JSON.parse(snapshot);
-    const records = normalizeRecoveryCheckIns(parsed);
-    if (!records) throw new Error("Saved recovery check-ins have an invalid format.");
-    return { records, error: "" };
-  } catch (error) {
-    return {
-      records: [],
-      error: error instanceof Error ? error.message : "Saved recovery check-ins could not be read.",
-    };
-  }
-}
 
 function subscribeToLocalDay(onChange: () => void): () => void {
   const update = () => onChange();
@@ -206,18 +164,56 @@ function RatingInput({
 
 export function DailyRecoveryCheckIn() {
   const today = useSyncExternalStore(subscribeToLocalDay, localRecoveryDate, () => "");
-  const recoverySnapshot = useSyncExternalStore(
-    subscribeToRecoveryRecords,
-    getRecoveryStorageSnapshot,
-    () => null,
-  );
-  const { records, error: storageError } = parseRecoveryStorageSnapshot(recoverySnapshot);
+  const [records, setRecords] = useState<RecoveryCheckIn[]>([]);
+  const [storageError, setStorageError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Draft>({ ...emptyDraft });
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
 
   const todaysRecord = records.find((record) => record.date === today);
+
+  useEffect(() => {
+    let active = true;
+    let requestId = 0;
+    const loadRecords = async (userId?: string | null) => {
+      const currentRequest = ++requestId;
+      setIsLoading(true);
+      try {
+        const loaded = await loadRecoveryCheckIns(userId);
+        if (!active || currentRequest !== requestId) return;
+        setRecords(loaded);
+        setStorageError("");
+      } catch (loadError) {
+        if (!active || currentRequest !== requestId) return;
+        setRecords([]);
+        setStorageError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Saved recovery check-ins could not be read.",
+        );
+      } finally {
+        if (active && currentRequest === requestId) setIsLoading(false);
+      }
+    };
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      queueMicrotask(() => {
+        if (!active) return;
+        setRecords([]);
+        void loadRecords(session?.user.id ?? null);
+      });
+    });
+    const reloadRecords = () => void loadRecords();
+    void loadRecords();
+    window.addEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, reloadRecords);
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+      window.removeEventListener(RECOVERY_CHECKINS_UPDATED_EVENT, reloadRecords);
+    };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -235,7 +231,7 @@ export function DailyRecoveryCheckIn() {
     setOpen(true);
   }
 
-  function save(event: FormEvent<HTMLFormElement>) {
+  async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!today) {
       setError("Your local calendar date is still being determined. Please try again.");
@@ -276,8 +272,14 @@ export function DailyRecoveryCheckIn() {
       ...(draft.recoveryNotes.trim() ? { recoveryNotes: draft.recoveryNotes.trim() } : {}),
       ...(numericOptional(draft.availableTrainingMinutes) === undefined ? {} : { availableTrainingMinutes: numericOptional(draft.availableTrainingMinutes) }),
     };
+    setIsSaving(true);
     try {
-      saveRecoveryCheckIn(input);
+      const saved = await saveRecoveryCheckIn(input);
+      setRecords((current) =>
+        [saved, ...current.filter((record) => record.date !== saved.date)].sort(
+          (left, right) => right.date.localeCompare(left.date),
+        ),
+      );
       setFeedback(todaysRecord ? "Today’s check-in updated." : "Today’s check-in saved.");
       setError("");
       setOpen(false);
@@ -287,6 +289,8 @@ export function DailyRecoveryCheckIn() {
           ? saveError.message
           : "The check-in could not be saved. Please try again.",
       );
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -311,7 +315,7 @@ export function DailyRecoveryCheckIn() {
           </div>
           <button
             className="min-h-10 rounded-lg bg-[#b8f36b] px-4 py-2 text-xs font-semibold text-[#102010] transition-colors hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b] disabled:cursor-wait disabled:opacity-60"
-            disabled={!today}
+            disabled={!today || isLoading}
             onClick={beginCheckIn}
             type="button"
           >
@@ -321,6 +325,10 @@ export function DailyRecoveryCheckIn() {
 
         {storageError ? (
           <p className="mt-4 text-xs text-[#f0b47c]" role="alert">{storageError}</p>
+        ) : isLoading ? (
+          <p className="mt-4 rounded-lg border border-white/[0.06] bg-[#0b100e] p-3 text-xs text-[#a6b1a9]">
+            Loading recovery check-ins…
+          </p>
         ) : !todaysRecord ? (
           <p className="mt-4 rounded-lg border border-white/[0.06] bg-[#0b100e] p-3 text-xs text-[#a6b1a9]">
             No recovery check-in recorded today.
@@ -387,7 +395,9 @@ export function DailyRecoveryCheckIn() {
           <Moon aria-hidden="true" className="text-[#8dd7e5]" size={15} />
           <h2 className="text-xs font-semibold text-[#e5ebe6]" id="recovery-history-heading">Recovery history</h2>
         </div>
-        {records.length === 0 ? (
+        {isLoading ? (
+          <p className="mt-3 text-[10px] text-[#87938b]">Loading recovery history…</p>
+        ) : records.length === 0 ? (
           <p className="mt-3 text-[10px] text-[#87938b]">Check-ins you save will appear here.</p>
         ) : (
           <div className="mt-3 overflow-x-auto">
@@ -538,8 +548,8 @@ export function DailyRecoveryCheckIn() {
                 <button className="min-h-10 rounded-lg border border-white/[0.08] px-4 py-2 text-xs text-[#a6b1a9] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#b8f36b]" onClick={() => setOpen(false)} type="button">
                   Cancel
                 </button>
-                <button className="min-h-10 rounded-lg bg-[#b8f36b] px-4 py-2 text-xs font-semibold text-[#102010] hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b]" type="submit">
-                  Save Check-In
+                <button className="min-h-10 rounded-lg bg-[#b8f36b] px-4 py-2 text-xs font-semibold text-[#102010] hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b] disabled:cursor-wait disabled:opacity-60" disabled={isSaving} type="submit">
+                  {isSaving ? "Saving…" : "Save Check-In"}
                 </button>
               </div>
             </form>
