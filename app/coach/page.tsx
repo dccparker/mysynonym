@@ -1,12 +1,5 @@
-import { PlaceholderPage } from "../components/placeholder-page";
+import { TodaysDecision } from "../components/todays-decision";
 
 export default function CoachPage() {
-  return (
-    <PlaceholderPage
-      title="AI Coach"
-      description="Get clear guidance based on your training and recovery data."
-      sectionTitle="Your coach"
-      detail="Personalized recommendations and training insights will be available here."
-    />
-  );
+  return <TodaysDecision presentation="coach" />;
 }

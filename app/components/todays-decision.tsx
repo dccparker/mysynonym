@@ -2,12 +2,16 @@
 
 import { useEffect, useState } from "react";
 import {
+  Activity,
   ArrowRight,
   Bike,
   CalendarDays,
   Clock3,
   Dumbbell,
   Footprints,
+  HeartPulse,
+  Target,
+  UserRound,
   X,
   Utensils,
   Waves,
@@ -40,7 +44,6 @@ import {
   type PlannedSession,
 } from "../lib/training-plan";
 import {
-  localRecoveryDate,
   loadRecoveryCheckIns,
   RECOVERY_CHECKINS_UPDATED_EVENT,
   type RecoveryCheckIn,
@@ -196,36 +199,60 @@ function countSessions(workouts: Workout[]): number {
   return new Set(workouts.map((workout) => workout.sessionId)).size;
 }
 
-function recommendedActivity(profile: AthleteProfile, recentTypes: string[]): string {
-  if (profile.primaryGoal === "Strength") return "Strength";
-  if (profile.primaryGoal === "Cycling Event") return "Ride";
-  if (profile.primaryGoal === "Marathon" || profile.primaryGoal === "Half Marathon") return "Run";
-  if (profile.primaryGoal === "Ironman" || profile.primaryGoal === "Half Ironman" || profile.primaryGoal === "Triathlon") {
-    const activitySequence = ["Run", "Ride", "Swim"];
-    const preferred = profile.preferredActivities
-      .map((activity) =>
-        activity === "Running"
-          ? "Run"
-          : activity === "Cycling"
-            ? "Ride"
-            : activity === "Swimming"
-              ? "Swim"
-              : activity,
-      )
-      .filter((activity) => activitySequence.includes(activity));
-    const sequence = preferred.length ? preferred : activitySequence;
-    return sequence.find((activity) => !recentTypes.includes(activity)) ?? sequence[0];
-  }
-  if (profile.primaryGoal === "HYROX") return "Run";
-  if (profile.preferredActivities.length > 0) {
-    const preferred = profile.preferredActivities[0];
-    if (preferred === "Running") return "Run";
-    if (preferred === "Cycling") return "Ride";
-    if (preferred === "Swimming") return "Swim";
-    if (preferred === "Strength training") return "Strength";
-    return preferred;
-  }
-  return "Run";
+function recommendedActivity(
+  profile: AthleteProfile,
+  recentTypes: string[],
+): { activity: string; avoidedDisliked: boolean } {
+  const activityByPreference: Record<string, string> = {
+    Running: "Run",
+    Cycling: "Ride",
+    Swimming: "Swim",
+    "Strength training": "Strength",
+    Other: "Other",
+  };
+  const goalOrder: Record<string, string[]> = {
+    Strength: ["Strength", "Run", "Ride", "Swim", "Other"],
+    "Cycling Event": ["Ride", "Run", "Swim", "Strength", "Other"],
+    Marathon: ["Run", "Ride", "Strength", "Swim", "Other"],
+    "Half Marathon": ["Run", "Ride", "Strength", "Swim", "Other"],
+    Ironman: ["Run", "Ride", "Swim", "Strength", "Other"],
+    "Half Ironman": ["Run", "Ride", "Swim", "Strength", "Other"],
+    Triathlon: ["Run", "Ride", "Swim", "Strength", "Other"],
+    HYROX: ["Run", "Strength", "Ride", "Swim", "Other"],
+  };
+  const goalActivities = goalOrder[profile.primaryGoal] ?? [];
+  const preferredActivities = profile.preferredActivities
+    .map((activity) => activityByPreference[activity])
+    .filter((activity): activity is string => activity !== undefined);
+  const candidates = [
+    ...new Set([...goalActivities, ...preferredActivities, "Run", "Ride", "Swim", "Strength", "Other"]),
+  ];
+  const disliked = new Set(
+    profile.dislikedActivities
+      .map((activity) => activityByPreference[activity])
+      .filter((activity): activity is string => activity !== undefined),
+  );
+  const equipmentForActivity: Record<string, string[]> = {
+    Run: ["Running access", "Treadmill"],
+    Ride: ["Road bike", "Indoor bike trainer"],
+    Swim: ["Pool access", "Open-water swimming access"],
+    Strength: ["Gym access", "Strength equipment"],
+  };
+  const hasEquipmentPreferences = profile.equipment.length > 0;
+  const available = candidates.filter((activity) => {
+    if (!hasEquipmentPreferences || activity === "Other") return true;
+    return (equipmentForActivity[activity] ?? []).some((item) => profile.equipment.includes(item));
+  });
+  const liked = available.filter((activity) => !disliked.has(activity));
+  const choices = liked.length > 0 ? liked : available;
+  const avoidedDisliked = liked.length === 0 && choices.some((activity) => disliked.has(activity));
+  return {
+    activity:
+      choices.find((activity) => !recentTypes.includes(activity)) ??
+      choices[0] ??
+      "Run",
+    avoidedDisliked,
+  };
 }
 
 function buildRecommendation(
@@ -233,15 +260,37 @@ function buildRecommendation(
   workouts: Workout[],
   plannedWorkouts: PlannedSession[],
   today: Date,
-  recovery?: RecoveryCheckIn,
+  recoveryHistory: RecoveryCheckIn[],
 ): Recommendation {
   const currentDay = weekDays[(today.getDay() + 6) % 7];
+  const todayString = localDateString(today);
+  const dailyPreferredDurationLimit =
+    today.getDay() === 0 || today.getDay() === 6
+      ? profile.maxWeekendWorkoutMinutes
+      : profile.maxWeekdayWorkoutMinutes;
   const weekStart = localDateString(startOfWeek(today));
+  const recentStartString = localDateString(
+    new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6),
+  );
+  const recovery = recoveryHistory.find((record) => record.date === todayString);
+  const recentRecovery = recoveryHistory.filter(
+    (record) => record.date >= recentStartString && record.date <= todayString,
+  );
+  const averageRecentReadiness = recentRecovery.length
+    ? Math.round(
+        recentRecovery.reduce((total, record) => total + record.readinessScore, 0) /
+          recentRecovery.length,
+      )
+    : null;
+  const persistentLowReadiness =
+    recentRecovery.length >= 2 &&
+    averageRecentReadiness !== null &&
+    averageRecentReadiness < 45;
   const thisWeekWorkouts = workouts.filter(
-    (workout) => workout.workoutDate >= weekStart && workout.workoutDate <= localDateString(today),
+    (workout) => workout.workoutDate >= weekStart && workout.workoutDate <= todayString,
   );
   const sortedHistory = workouts
-    .filter((workout) => workout.workoutDate <= localDateString(today))
+    .filter((workout) => workout.workoutDate <= todayString)
     .sort((left, right) =>
       right.workoutDate.localeCompare(left.workoutDate) ||
       (right.startTime ?? "").localeCompare(left.startTime ?? ""),
@@ -252,7 +301,6 @@ function buildRecommendation(
     profile.weeklyTrainingHours === null ? null : profile.weeklyTrainingHours * 60;
   const availabilityReached =
     availableMinutes !== null && availableMinutes > 0 && totalMinutes >= availableMinutes * 0.8;
-  const todayString = localDateString(today);
   const lastWorkoutAgeDays = lastWorkout
     ? Math.floor(
         (new Date(`${todayString}T00:00:00`).getTime() -
@@ -260,7 +308,9 @@ function buildRecommendation(
           86_400_000,
       )
     : null;
-  const recentTypes = thisWeekWorkouts.map((workout) => workout.activityType);
+  const recentTypes = sortedHistory
+    .filter((workout) => workout.workoutDate >= recentStartString)
+    .map((workout) => workout.activityType);
   const thisWeekSessionCount = countSessions(thisWeekWorkouts);
   const completedSessionMap = new Map<string, CompletedSession>();
   for (const workout of workouts) {
@@ -333,9 +383,7 @@ function buildRecommendation(
       ? `Today's planned sessions: ${todaysPlannedWorkouts.map((plannedSession) => `${plannedSession.title} (${plannedSession.activities.map((activity) => `${activity.activityType} ${activity.durationMinutes} min`).join(", ")})`).join("; ")}.`
       : `No workouts are planned for ${currentDay}.`,
   ];
-  const recentStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6);
   const previousStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 13);
-  const recentStartString = localDateString(recentStart);
   const previousStartString = localDateString(previousStart);
   const recentSevenDays = sortedHistory.filter(
     (workout) => workout.workoutDate >= recentStartString,
@@ -381,6 +429,12 @@ function buildRecommendation(
   if (profile.longWorkoutDay) {
     profileData.push(`Preferred long-workout day: ${profile.longWorkoutDay}.`);
   }
+  if (profile.preferredActivities.length > 0) {
+    profileData.push(`Preferred activities: ${profile.preferredActivities.join(", ")}.`);
+  }
+  if (profile.dislikedActivities.length > 0) {
+    profileData.push(`Activities to avoid: ${profile.dislikedActivities.join(", ")}.`);
+  }
   if (profile.equipment.length > 0 || profile.otherEquipment.trim()) {
     profileData.push(
       `Available equipment: ${[...profile.equipment, profile.otherEquipment].filter(Boolean).join(", ")}.`,
@@ -399,28 +453,49 @@ function buildRecommendation(
           : []),
       ]
     : [];
-  const recoveryPriority = recoveryConcerns.length >= 3 || Boolean(recovery?.painNotes?.trim());
-  const recoveryConcern = recoveryConcerns.length > 0 || Boolean(recovery?.painNotes?.trim());
-  const timeLimited =
-    Boolean(
-      recovery &&
-        selectedPlan &&
-        recovery.availableTrainingMinutes !== undefined &&
-        recovery.availableTrainingMinutes < plannedSessionDuration(selectedPlan),
-    );
+  const recoveryPriority =
+    recoveryConcerns.length >= 3 ||
+    Boolean(recovery?.painNotes?.trim()) ||
+    persistentLowReadiness;
+  const recoveryConcern =
+    recoveryConcerns.length > 0 ||
+    Boolean(recovery?.painNotes?.trim()) ||
+    persistentLowReadiness;
+  const availableSessionMinutes = [
+    recovery?.availableTrainingMinutes,
+    dailyPreferredDurationLimit ?? undefined,
+  ].filter((minutes): minutes is number => minutes !== undefined);
+  const effectiveSessionLimit = availableSessionMinutes.length
+    ? Math.min(...availableSessionMinutes)
+    : undefined;
+  const timeLimited = Boolean(
+    selectedPlan &&
+      effectiveSessionLimit !== undefined &&
+      effectiveSessionLimit < plannedSessionDuration(selectedPlan),
+  );
   const needsRecoveryAdjustment = recoveryConcern || timeLimited;
-  const recoveryExplanation = !recovery
-    ? "No recovery check-in was available for this recommendation."
-    : recoveryConcern
-      ? `Today's workout was reduced because your check-in reported ${[
+  const recentReadinessExplanation = recentRecovery.length > 0
+    ? `Recent recovery check-ins average ${averageRecentReadiness}/100 across ${recentRecovery.length} entries in the last 7 days.`
+    : "";
+  const recoveryExplanation = recoveryConcern
+    ? `${recovery && (recoveryConcerns.length > 0 || recovery.painNotes?.trim())
+      ? `Today's workout was reduced because today's check-in reported ${[
           ...recoveryConcerns,
           ...(recovery.painNotes?.trim() ? ["pain or a limitation"] : []),
-        ].join(" and ")}.${timeLimited ? ` It was also shortened to fit the ${recovery.availableTrainingMinutes}-minute training time you entered.` : ""}`
-      : timeLimited
-        ? `Today's workout was shortened to fit the ${recovery.availableTrainingMinutes}-minute training time you entered. Your saved weekly plan has not been changed.`
-      : "Your planned workout remains appropriate based on today's check-in.";
+        ].join(" and ")}.`
+      : "A recovery-focused option is recommended based on your recent check-ins."}${persistentLowReadiness ? ` ${recentReadinessExplanation} Keep today's training light while readiness remains low.` : ""}${timeLimited ? ` It was also shortened to fit your ${effectiveSessionLimit}-minute available training limit.` : ""}`
+    : timeLimited
+      ? `Today's workout was shortened to fit your ${effectiveSessionLimit}-minute available training limit. Your saved weekly plan has not been changed.`
+      : !recovery
+        ? recentReadinessExplanation
+          ? `No check-in was recorded today. ${recentReadinessExplanation}`
+          : "No recovery check-in was available for this recommendation."
+        : "Your planned workout remains appropriate based on today's check-in.";
   const recoveryReasoning = [
     recoveryExplanation,
+    ...(recentReadinessExplanation
+      ? [recentReadinessExplanation]
+      : []),
     ...(recovery
       ? [
           `Estimated readiness from the check-in is ${recovery.readinessCategory} (${recovery.readinessScore}/100); energy ${recovery.energy}/5, soreness ${recovery.soreness}/5, stress ${recovery.stress}/5, motivation ${recovery.motivation}/5, and sleep quality ${recovery.sleepQuality}/5.`,
@@ -466,8 +541,8 @@ function buildRecommendation(
                     : recoveryConcern
                       ? 0.8
                       : 1,
-                  timeLimited && recovery?.availableTrainingMinutes !== undefined
-                    ? recovery.availableTrainingMinutes /
+                  timeLimited && effectiveSessionLimit !== undefined
+                    ? effectiveSessionLimit /
                         Math.max(plannedSessionDuration(selectedPlan), 1)
                     : 1,
                 ),
@@ -541,6 +616,25 @@ function buildRecommendation(
     };
   }
 
+  if (!profile.availableTrainingDays.includes(currentDay)) {
+    return {
+      title: "Rest day",
+      duration: "No training scheduled",
+      why: `${currentDay} is not one of your available training days in your athlete profile, so no extra workout is suggested.${recoveryConcern ? ` ${recoveryExplanation}` : ""}`,
+      nutrition: "Follow your usual meals and drink to thirst.",
+      recovery: "Keep today free of planned training and return to your next available training day.",
+      confidence: 92,
+      recoveryAdjustment: recoveryExplanation,
+      reasoning: [
+        ...profileData,
+        ...historyReasoning,
+        ...plannerReasoning,
+        ...recoveryReasoning,
+        `Today's date is ${currentDay}, which is not listed among your available training days.`,
+      ],
+    };
+  }
+
   const recoveryReasons: string[] = [];
   if (thisWeekSessionCount >= 3) {
     recoveryReasons.push(`${thisWeekSessionCount} training sessions have already been completed this week`);
@@ -555,7 +649,11 @@ function buildRecommendation(
     recoveryReasons.push("the latest completed workout was today");
   }
   if (recoveryPriority) {
-    recoveryReasons.push("today's recovery check-in indicates several recovery concerns");
+    recoveryReasons.push(
+      persistentLowReadiness && !recovery
+        ? "multiple recent recovery check-ins show low readiness"
+        : "today's recovery check-in indicates several recovery concerns",
+    );
   } else if (needsRecoveryAdjustment) {
     recoveryReasons.push("today's recovery check-in indicates reduced readiness");
   }
@@ -580,7 +678,7 @@ function buildRecommendation(
     };
   }
 
-  const activity = recommendedActivity(profile, recentTypes);
+  const { activity, avoidedDisliked } = recommendedActivity(profile, recentTypes);
   const isNoWorkouts = thisWeekSessionCount === 0;
   const isLongDay = currentDay === profile.longWorkoutDay;
   const goalSupportsEndurance = [
@@ -591,12 +689,21 @@ function buildRecommendation(
     "Triathlon",
     "Cycling Event",
   ].includes(profile.primaryGoal);
-  const plannedDurationMinutes = isLongDay && goalSupportsEndurance ? 75 : 45;
+  const plannedDurationMinutes = isLongDay && goalSupportsEndurance
+    ? profile.trainingExperience === "Beginner"
+      ? 60
+      : 75
+    : 45;
   const durationMinutes = Math.min(
     plannedDurationMinutes,
+    dailyPreferredDurationLimit ?? plannedDurationMinutes,
     recovery?.availableTrainingMinutes ?? plannedDurationMinutes,
   );
   const fallbackTimeLimited = durationMinutes < plannedDurationMinutes;
+  const fallbackTimeLimit = Math.min(
+    dailyPreferredDurationLimit ?? plannedDurationMinutes,
+    recovery?.availableTrainingMinutes ?? plannedDurationMinutes,
+  );
   const duration = `${durationMinutes} minutes`;
   const goalAlignedRecommendation =
     activity === "Run"
@@ -629,8 +736,28 @@ function buildRecommendation(
       ? "no completed workouts recorded this week"
       : `${thisWeekSessionCount} completed training session${thisWeekSessionCount === 1 ? "" : "s"} this week`,
   ];
+  if (profile.trainingExperience) {
+    whyParts.push(`your ${profile.trainingExperience.toLowerCase()} training experience`);
+  }
   if (isLongDay) whyParts.push("today is your preferred long-workout day");
   if (matchingEquipment) whyParts.push(`you have ${matchingEquipment.toLowerCase()}`);
+  if (avoidedDisliked) {
+    whyParts.push("your preferred activities and available equipment left no non-disliked option");
+  } else if (profile.dislikedActivities.length > 0) {
+    whyParts.push("activities you marked as disliked were excluded");
+  }
+  if (
+    dailyPreferredDurationLimit !== null &&
+    dailyPreferredDurationLimit !== undefined &&
+    dailyPreferredDurationLimit < plannedDurationMinutes
+  ) {
+    whyParts.push(`your preferred ${dailyPreferredDurationLimit}-minute ${today.getDay() === 0 || today.getDay() === 6 ? "weekend" : "weekday"} workout limit`);
+  }
+  if (recentTypes.includes(activity)) {
+    whyParts.push(`${activity.toLowerCase()} is still the best goal-aligned option among your recent activities`);
+  } else if (recentTypes.length > 0) {
+    whyParts.push(`${activity.toLowerCase()} adds variety to your recent training`);
+  }
   const historyReason = isNoWorkouts
     ? "No completed workouts were found for the current Monday–Sunday week."
     : `This week includes ${thisWeekSessionCount} training session${thisWeekSessionCount === 1 ? "" : "s"} across ${thisWeekWorkouts.length} activities: ${thisWeekWorkouts.map((workout) => `${workout.workoutTitle || workout.activityType} on ${formatWorkoutDate(workout.workoutDate)}`).join(", ")}.`;
@@ -648,21 +775,21 @@ function buildRecommendation(
               ? "Use familiar strength movements with controlled, comfortable repetitions."
               : "Choose familiar movement and keep the effort controlled.",
     purpose: `Support your ${goalLabel(profile)} goal with a manageable session.`,
-    why: `Selected to match ${whyParts.join(", ")}.${fallbackTimeLimited ? ` Shortened to fit the ${recovery?.availableTrainingMinutes}-minute training time you entered.` : ""}`,
+    why: `Selected to match ${whyParts.join(", ")}.${fallbackTimeLimited ? ` Shortened to fit your ${fallbackTimeLimit}-minute available training limit.` : ""}`,
     nutrition: activity === "Strength"
       ? "Include a protein-containing meal or snack as part of your normal daily eating."
       : "Include familiar carbohydrate and protein sources around the session, and drink to thirst.",
     recovery: "Keep the effort controlled and leave room for your next planned session.",
     confidence: isNoWorkouts ? 78 : 84,
     recoveryAdjustment: fallbackTimeLimited
-      ? `Today's recommendation was shortened to fit the ${recovery?.availableTrainingMinutes}-minute training time you entered.`
+      ? `Today's recommendation was shortened to fit your ${fallbackTimeLimit}-minute available training limit.`
       : recoveryExplanation,
     reasoning: [
       ...profileData,
       ...historyReasoning,
       ...plannerReasoning,
       ...recoveryReasoning,
-      ...(fallbackTimeLimited ? [`Duration reduced from ${plannedDurationMinutes} to ${durationMinutes} minutes to fit the time entered for today.`] : []),
+      ...(fallbackTimeLimited ? [`Duration reduced from ${plannedDurationMinutes} to ${durationMinutes} minutes to fit your available training limit.`] : []),
       historyReason,
       `Rule applied: ${isNoWorkouts ? "with no training sessions this week, choose an activity aligned with the primary goal" : `with ${thisWeekSessionCount} training session${thisWeekSessionCount === 1 ? "" : "s"} completed and no recovery threshold reached, continue with a goal-aligned session`}.`,
       ...(lastWorkout ? [`Last workout type was ${lastWorkout.activityType}${lastWorkoutAgeDays === 0 ? " today" : ` ${lastWorkoutAgeDays} day${lastWorkoutAgeDays === 1 ? "" : "s"} ago`}; recent logged types: ${[...new Set(recentTypes)].join(", ") || "none this week"}.`] : []),
@@ -696,13 +823,18 @@ function DecisionItem({
   );
 }
 
-export function TodaysDecision() {
-  const { profile, isProfileLoaded } = useAthleteProfile();
+export function TodaysDecision({
+  presentation = "dashboard",
+}: {
+  presentation?: "dashboard" | "coach";
+}) {
+  const { profile, isProfileLoaded, profileError } = useAthleteProfile();
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [plannedWorkouts, setPlannedWorkouts] = useState<PlannedSession[]>([]);
-  const [recoveryCheckIn, setRecoveryCheckIn] = useState<RecoveryCheckIn>();
+  const [recoveryHistory, setRecoveryHistory] = useState<RecoveryCheckIn[]>([]);
   const [recoveryError, setRecoveryError] = useState("");
   const [isWorkoutHistoryLoaded, setIsWorkoutHistoryLoaded] = useState(false);
+  const [isRecoveryHistoryLoaded, setIsRecoveryHistoryLoaded] = useState(false);
   const [isPlannerLoaded, setIsPlannerLoaded] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [plannerError, setPlannerError] = useState("");
@@ -1049,20 +1181,24 @@ export function TodaysDecision() {
     };
     const loadRecovery = async (userId?: string | null) => {
       const currentRequest = ++recoveryRequestId;
+      setIsRecoveryHistoryLoaded(false);
       try {
-        const todayDate = localRecoveryDate();
         const records = await loadRecoveryCheckIns(userId);
         if (!active || currentRequest !== recoveryRequestId) return;
-        setRecoveryCheckIn(records.find((record) => record.date === todayDate));
+        setRecoveryHistory(records);
         setRecoveryError("");
       } catch (loadError) {
         if (!active || currentRequest !== recoveryRequestId) return;
-        setRecoveryCheckIn(undefined);
+        setRecoveryHistory([]);
         setRecoveryError(
           loadError instanceof Error
             ? loadError.message
             : "Saved recovery check-in is unavailable.",
         );
+      } finally {
+        if (active && currentRequest === recoveryRequestId) {
+          setIsRecoveryHistoryLoaded(true);
+        }
       }
     };
     const updateDate = () => setToday(new Date());
@@ -1077,7 +1213,8 @@ export function TodaysDecision() {
         if (!active) return;
         setWorkouts([]);
         setIsWorkoutHistoryLoaded(false);
-        setRecoveryCheckIn(undefined);
+        setRecoveryHistory([]);
+        setIsRecoveryHistoryLoaded(false);
         setRecoveryError("");
         void loadWorkouts();
         void loadRecovery(session?.user.id ?? null);
@@ -1135,8 +1272,14 @@ export function TodaysDecision() {
     ...(hasSupportedEquipment ? [] : ["available equipment"]),
   ];
   const recommendation =
-    isProfileComplete && profile && today && isPlannerLoaded && !plannerError
-      ? buildRecommendation(profile, workouts, plannedWorkouts, today, recoveryCheckIn)
+    isProfileComplete &&
+    profile &&
+    today &&
+    isPlannerLoaded &&
+    isWorkoutHistoryLoaded &&
+    isRecoveryHistoryLoaded &&
+    !plannerError
+      ? buildRecommendation(profile, workouts, plannedWorkouts, today, recoveryHistory)
       : null;
   const plannedWorkout = recommendation?.plannedSessionId
     ? plannedWorkouts.find((session) => session.id === recommendation.plannedSessionId)
@@ -1187,6 +1330,316 @@ export function TodaysDecision() {
           0,
         );
 
+  if (presentation === "coach") {
+    const asOfDate = today ? localDateString(today) : "";
+    const weekStart = today ? localDateString(startOfWeek(today)) : "";
+    const recentStart = today
+      ? localDateString(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6))
+      : "";
+    const coachWeekWorkouts = workouts.filter(
+      (workout) => workout.workoutDate >= weekStart && workout.workoutDate <= asOfDate,
+    );
+    const coachRecentWorkouts = workouts.filter(
+      (workout) => workout.workoutDate >= recentStart && workout.workoutDate <= asOfDate,
+    );
+    const recentRecovery = recoveryHistory.filter(
+      (entry) => entry.date >= recentStart && entry.date <= asOfDate,
+    );
+    const latestRecovery = recoveryHistory[0];
+    const meanReadiness = recentRecovery.length
+      ? Math.round(
+          recentRecovery.reduce((sum, entry) => sum + entry.readinessScore, 0) /
+            recentRecovery.length,
+        )
+      : null;
+    const latestWorkout = workouts.filter((workout) => workout.workoutDate <= asOfDate).sort(
+      (left, right) =>
+        right.workoutDate.localeCompare(left.workoutDate) ||
+        (right.startTime ?? "").localeCompare(left.startTime ?? ""),
+    )[0];
+    const activityMinutes = new Map<string, number>();
+    coachRecentWorkouts.forEach((workout) =>
+      activityMinutes.set(
+        workout.activityType,
+        (activityMinutes.get(workout.activityType) ?? 0) + workout.duration,
+      ),
+    );
+    const weeklyMinutes = coachWeekWorkouts.reduce((sum, workout) => sum + workout.duration, 0);
+    const goalActivity = profile ? recommendedActivity(profile, coachRecentWorkouts.map((workout) => workout.activityType)).activity : "";
+
+    return (
+      <div className="mx-auto w-full max-w-[1480px] px-4 py-6 sm:px-6 lg:px-9 lg:py-8">
+        <header className="mb-7">
+          <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#b8f36b]">
+            <Zap aria-hidden="true" size={13} /> Rule-based coaching · Uses your saved data
+          </p>
+          <h1 className="mt-2 text-[25px] font-semibold tracking-[-0.04em] text-[#f1f4f0] sm:text-[29px]">
+            AI Coach
+          </h1>
+          <p className="mt-1.5 text-xs text-[#87938b]">
+            A clear view of today’s recommendation and the profile, training, and recovery data behind it.
+          </p>
+        </header>
+
+        {!isProfileLoaded ||
+        !isWorkoutHistoryLoaded ||
+        !isRecoveryHistoryLoaded ||
+        !isPlannerLoaded ? (
+          <p className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 text-xs text-[#87938b]" role="status">
+            Loading your profile, workout history, and recovery history…
+          </p>
+        ) : (
+          <>
+            {(profileError || historyError || recoveryError || plannerError) && (
+              <div className="mb-4 grid gap-2" role="alert">
+                {[profileError, historyError, recoveryError, plannerError]
+                  .filter(Boolean)
+                  .map((message) => (
+                    <p
+                      className="rounded-lg border border-[#f0b47c]/20 bg-[#f0b47c]/[0.06] p-3 text-xs text-[#f0c49d]"
+                      key={message}
+                    >
+                      {message}
+                    </p>
+                  ))}
+              </div>
+            )}
+
+            {recommendation ? (
+              <>
+                <section className="rounded-xl border border-[#b8f36b]/20 p-5 sm:p-7" style={{
+                  background: "radial-gradient(ellipse at 8% 0%, rgba(184,243,107,0.15), transparent 48%), linear-gradient(135deg, #141c17 0%, #0f1512 62%, #111714 100%)",
+                }}>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#b8f36b]">
+                    Today’s recommendation · {generatedDate}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <h2 className="text-2xl font-semibold tracking-[-0.035em] text-[#f0f4ef]">
+                      {recommendation.title}
+                    </h2>
+                    <span className="flex items-center gap-1 text-xs text-[#b8f36b]">
+                      <Clock3 aria-hidden="true" size={13} /> {recommendation.duration}
+                    </span>
+                  </div>
+                  <p className="mt-3 max-w-3xl text-sm leading-relaxed text-[#c2cdc5]">
+                    {recommendation.why}
+                  </p>
+                  {recommendation.instructions && (
+                    <p className="mt-3 max-w-3xl text-xs leading-relaxed text-[#a6b1a9]">
+                      {recommendation.instructions}
+                    </p>
+                  )}
+                  {recommendation.purpose && (
+                    <p className="mt-2 text-[11px] text-[#87938b]">
+                      Purpose: {recommendation.purpose}
+                    </p>
+                  )}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <span className="rounded-full border border-[#b8f36b]/15 bg-[#b8f36b]/[0.06] px-2.5 py-1 text-[10px] font-medium text-[#c5ef97]">
+                      Rule-based confidence · {recommendation.confidence}%
+                    </span>
+                    {recommendation.plannerBased && (
+                      <span className="rounded-full border border-[#8dd7e5]/15 bg-[#8dd7e5]/[0.05] px-2.5 py-1 text-[10px] font-medium text-[#b9e5eb]">
+                        From your Training Planner
+                      </span>
+                    )}
+                  </div>
+                </section>
+
+                {recommendation.activities && (
+                  <section className="mt-4 rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                    <h2 className="text-sm font-semibold text-[#e5ebe6]">Workout details</h2>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      {recommendation.activities.map((activity) => (
+                        <article className="rounded-lg border border-white/[0.06] bg-[#0b100e] p-3" key={activity.id}>
+                          <h3 className="text-xs font-semibold text-[#dce4dd]">
+                            {activity.activityType} · {activity.durationMinutes} min · {activity.intensity}
+                          </h3>
+                          <p className="mt-2 text-[11px] leading-relaxed text-[#a6b1a9]">{activity.instructions}</p>
+                          <p className="mt-2 text-[10px] leading-relaxed text-[#87938b]">
+                            <span className="font-semibold">Purpose:</span> {activity.purpose}
+                          </p>
+                          <p className="mt-1 text-[10px] leading-relaxed text-[#87938b]">
+                            <span className="font-semibold">Effort:</span> {effortExplanation(activity.intensity)}
+                          </p>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                  <section className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                    <div className="flex items-center gap-2">
+                      <HeartPulse aria-hidden="true" className="text-[#8dd7e5]" size={15} />
+                      <h2 className="text-sm font-semibold text-[#e5ebe6]">Recovery analysis</h2>
+                    </div>
+                    <p className="mt-3 text-xs leading-relaxed text-[#c2cdc5]">
+                      {recommendation.recoveryAdjustment || recommendation.recovery}
+                    </p>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {[
+                        ["Check-ins · last 7 days", String(recentRecovery.length)],
+                        ["Average readiness", meanReadiness === null ? "No data" : `${meanReadiness}/100`],
+                        ["Latest readiness", latestRecovery ? `${latestRecovery.readinessCategory} · ${latestRecovery.readinessScore}/100` : "No recent check-in"],
+                        ["Sleep quality", latestRecovery ? `${latestRecovery.sleepQuality}/5` : "No data"],
+                        ["Energy", latestRecovery ? `${latestRecovery.energy}/5` : "No data"],
+                        ["Soreness", latestRecovery ? `${latestRecovery.soreness}/5` : "No data"],
+                      ].map(([label, value]) => (
+                        <div className="rounded-md border border-white/[0.05] bg-[#0b100e] p-2.5" key={label}>
+                          <p className="text-[9px] text-[#78857d]">{label}</p>
+                          <p className="mt-1 text-[11px] font-medium text-[#dce4dd]">{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {latestRecovery?.painNotes && (
+                      <p className="mt-3 text-[10px] leading-relaxed text-[#f0c49d]">
+                        Limitation noted: {latestRecovery.painNotes}
+                      </p>
+                    )}
+                    {latestRecovery?.recoveryNotes && (
+                      <p className="mt-2 text-[10px] leading-relaxed text-[#87938b]">
+                        Check-in note: {latestRecovery.recoveryNotes}
+                      </p>
+                    )}
+                    <p className="mt-3 text-[10px] leading-relaxed text-[#78857d]">
+                      Recovery scores are simple estimates based on your recorded check-ins, not a medical assessment.
+                    </p>
+                  </section>
+
+                  <section className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                    <div className="flex items-center gap-2">
+                      <Activity aria-hidden="true" className="text-[#b8f36b]" size={15} />
+                      <h2 className="text-sm font-semibold text-[#e5ebe6]">Workout analysis</h2>
+                    </div>
+                    <p className="mt-3 text-xs leading-relaxed text-[#c2cdc5]">
+                      {coachRecentWorkouts.length
+                        ? `${countSessions(coachRecentWorkouts)} training sessions across ${coachRecentWorkouts.length} recorded activities in the last 7 days, totaling ${coachRecentWorkouts.reduce((sum, workout) => sum + workout.duration, 0)} minutes.`
+                        : "No completed workouts are recorded in the last 7 days."}
+                    </p>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {[
+                        ["Sessions this week", String(countSessions(coachWeekWorkouts))],
+                        ["Time this week", `${Math.round(weeklyMinutes)} min`],
+                        ["Latest workout", latestWorkout ? formatWorkoutDate(latestWorkout.workoutDate) : "No data"],
+                        ["Latest activity", latestWorkout?.activityType ?? "No data"],
+                      ].map(([label, value]) => (
+                        <div className="rounded-md border border-white/[0.05] bg-[#0b100e] p-2.5" key={label}>
+                          <p className="text-[9px] text-[#78857d]">{label}</p>
+                          <p className="mt-1 text-[11px] font-medium text-[#dce4dd]">{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {activityMinutes.size > 0 && (
+                      <p className="mt-3 text-[10px] leading-relaxed text-[#a6b1a9]">
+                        Recent activity mix: {[...activityMinutes.entries()]
+                          .map(([activity, minutes]) => `${activity} ${Math.round(minutes)} min`)
+                          .join(" · ")}.
+                      </p>
+                    )}
+                    {recommendation.recovery && (
+                      <p className="mt-3 text-[10px] leading-relaxed text-[#87938b]">
+                        Training focus: {recommendation.recovery}
+                      </p>
+                    )}
+                  </section>
+
+                  <section className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                    <div className="flex items-center gap-2">
+                      <Target aria-hidden="true" className="text-[#b8f36b]" size={15} />
+                      <h2 className="text-sm font-semibold text-[#e5ebe6]">Goal alignment</h2>
+                    </div>
+                    <p className="mt-3 text-xs leading-relaxed text-[#c2cdc5]">
+                      {profile
+                        ? `${recommendation.title} is selected to support your ${goalLabel(profile)} goal${profile.targetEventName ? ` and your ${profile.targetEventName} event${profile.targetEventDate ? ` on ${formatWorkoutDate(profile.targetEventDate)}` : ""}` : ""}.`
+                        : "Complete your athlete profile to align recommendations with a training goal."}
+                    </p>
+                    {profile?.goalDescription && (
+                      <p className="mt-2 text-[10px] leading-relaxed text-[#87938b]">{profile.goalDescription}</p>
+                    )}
+                    {goalActivity && (
+                      <p className="mt-2 text-[10px] text-[#a6b1a9]">
+                        Goal-aligned activity considered: {goalActivity}.
+                      </p>
+                    )}
+                    {recommendation.purpose && (
+                      <p className="mt-2 text-[10px] leading-relaxed text-[#a6b1a9]">{recommendation.purpose}</p>
+                    )}
+                  </section>
+
+                  <section className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                    <div className="flex items-center gap-2">
+                      <UserRound aria-hidden="true" className="text-[#b8f36b]" size={15} />
+                      <h2 className="text-sm font-semibold text-[#e5ebe6]">Athlete profile</h2>
+                    </div>
+                    {profile ? (
+                      <dl className="mt-3 grid grid-cols-2 gap-2">
+                        {[
+                          ["Athlete", profile.preferredName || "Name not set"],
+                          ["Experience", profile.trainingExperience || "Not set"],
+                          ["Goal", goalLabel(profile)],
+                          ["Weekly availability", profile.weeklyTrainingHours === null ? "Not set" : `${profile.weeklyTrainingHours} hours`],
+                          ["Training days", profile.availableTrainingDays.join(", ") || "Not set"],
+                          ["Long workout day", profile.longWorkoutDay || "Not set"],
+                          ["Target event", profile.targetEventName || "Not set"],
+                          ["Preferred duration", `${profile.maxWeekdayWorkoutMinutes ?? "—"} min weekdays · ${profile.maxWeekendWorkoutMinutes ?? "—"} min weekends`],
+                          ["Preferred activities", profile.preferredActivities.join(", ") || "No preference set"],
+                          ["Activities to avoid", profile.dislikedActivities.join(", ") || "None listed"],
+                          ["Equipment", [...profile.equipment, profile.otherEquipment].filter(Boolean).join(", ") || "Not set"],
+                          ["Limitations", [profile.currentLimitations, profile.healthConsiderations].filter(Boolean).join(" · ") || "None noted"],
+                        ].map(([label, value]) => (
+                          <div className="rounded-md border border-white/[0.05] bg-[#0b100e] p-2.5" key={label}>
+                            <dt className="text-[9px] text-[#78857d]">{label}</dt>
+                            <dd className="mt-1 text-[11px] font-medium text-[#dce4dd]">{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : (
+                      <p className="mt-3 text-xs text-[#87938b]">No athlete profile is saved yet.</p>
+                    )}
+                  </section>
+                </div>
+
+                <section className="mt-4 rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5">
+                  <h2 className="text-sm font-semibold text-[#e5ebe6]">Reasoning</h2>
+                  <p className="mt-1 text-[10px] leading-relaxed text-[#78857d]">
+                    This is the same rule-based recommendation shown on your dashboard, using your saved profile, workout, and recovery data.
+                  </p>
+                  <ul className="mt-3 grid gap-2 text-[11px] leading-relaxed text-[#a6b1a9]">
+                    {recommendation.reasoning.map((reason) => (
+                      <li className="flex gap-2" key={reason}>
+                        <span aria-hidden="true" className="mt-1.5 size-1 shrink-0 rounded-full bg-[#b8f36b]" />
+                        {reason}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </>
+            ) : (
+              <section className="rounded-lg border border-white/[0.07] bg-[#111714] p-5">
+                <h2 className="text-sm font-semibold text-[#e5ebe6]">Personalize your coaching</h2>
+                <p className="mt-2 text-xs leading-relaxed text-[#87938b]">
+                  Complete your athlete profile and training planner to get a recommendation based on your goals, recent workouts, and recovery check-ins.
+                </p>
+                {profile && (
+                  <p className="mt-2 text-[10px] text-[#a6b1a9]">
+                    Profile goal: {goalLabel(profile)} · {profile.trainingExperience || "Experience not set"} · {profile.availableTrainingDays.join(", ") || "Training days not set"}.
+                  </p>
+                )}
+                <Link
+                  className="mt-4 inline-flex items-center gap-1.5 text-xs font-semibold text-[#c5ef97] hover:text-[#d0f79d]"
+                  href="/settings"
+                >
+                  Update athlete profile <ArrowRight aria-hidden="true" size={14} />
+                </Link>
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
     <>
     <section
@@ -1224,9 +1677,16 @@ export function TodaysDecision() {
           </p>
         )}
 
-        {!isProfileLoaded || !isWorkoutHistoryLoaded || !isPlannerLoaded ? (
+        {!isProfileLoaded ||
+        !isWorkoutHistoryLoaded ||
+        !isRecoveryHistoryLoaded ||
+        !isPlannerLoaded ? (
           <p className="mt-6 text-xs text-[#87938b]" role="status">
-            Loading your profile, training plan, and workout history…
+            Loading your Supabase profile, workout history, and recovery history…
+          </p>
+        ) : profileError ? (
+          <p className="mt-6 text-xs text-[#f0c49d]" role="alert">
+            {profileError}
           </p>
         ) : !isProfileComplete ? (
           <div className="mt-6 rounded-lg border border-[#b8f36b]/15 bg-[#0b100e]/65 p-4 sm:p-5">
