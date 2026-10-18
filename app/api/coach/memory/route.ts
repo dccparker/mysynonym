@@ -69,6 +69,7 @@ export async function GET(request: Request) {
       .from("coach_memories")
       .select("id,source_message_id,category,detail,created_at")
       .eq("user_id", userId)
+      .not("source_message_id", "is", null)
       .order("created_at", { ascending: false })
       .limit(50);
     if (error) throw new CoachRequestError("Saved Coach memories could not be loaded.", 500);

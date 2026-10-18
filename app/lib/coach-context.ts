@@ -354,9 +354,27 @@ export async function loadCoachContext(
       .from("coach_memories")
       .select("category,detail,created_at")
       .eq("user_id", userId)
+      .neq("category", "athlete_pattern")
       .order("created_at", { ascending: false })
       .limit(50),
   ]);
+  // Derived athlete patterns need the Phase 6 migration; coaching still works without it.
+  const patternResult = await supabase
+    .from("coach_memories")
+    .select("memory_type,signal,detail,confidence,evidence_count,updated_at")
+    .eq("user_id", userId)
+    .eq("category", "athlete_pattern")
+    .order("updated_at", { ascending: false })
+    .limit(40);
+  const athletePatterns = patternResult.error
+    ? []
+    : patternResult.data.map((pattern) => ({
+        type: pattern.memory_type,
+        signal: pattern.signal,
+        pattern: pattern.detail,
+        confidence: pattern.confidence,
+        evidenceCount: pattern.evidence_count,
+      }));
   if (
     profileResult.error ||
     workoutResult.error ||
@@ -382,6 +400,7 @@ export async function loadCoachContext(
       workoutHistory: summarizeWorkouts(workoutData),
       recoveryHistory: summarizeRecovery(recoveryData),
       currentPlanner: planner,
+      athletePatterns,
       savedCoachMemories: memoryResult.data.map((memory) => ({
         category: memory.category,
         detail: memory.detail,

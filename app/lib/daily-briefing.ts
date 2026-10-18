@@ -7,7 +7,12 @@ import type { PlannedActivityType, PlannedIntensity, PlannedSession } from "./tr
 export type BriefingConfidence = "High" | "Medium" | "Low";
 export type PlanStatusLabel = "On Track" | "Slightly Behind" | "Ahead Of Plan";
 
-export type BriefingMemory = { category: string; detail: string };
+export type BriefingMemory = {
+  category: string;
+  detail: string;
+  signal?: "strength" | "watch" | "trend" | null;
+  confidence?: string | null;
+};
 export type BriefingRecommendation = {
   recommendation: string;
   approvedAt: string | null;
@@ -335,6 +340,11 @@ function buildWhy(input: BriefingInput, workout: BriefingWorkout, phase: Trainin
   if (readiness && readiness.readinessScore < 40) {
     reasons.push("Your check-in shows low readiness, so keep effort controlled");
   }
+  const dayName = new Date(dateOnly(today)).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  const personal = input.memories.find(
+    (m) => m.signal === "watch" && m.confidence !== "Low" && m.detail.includes(dayName),
+  );
+  if (personal && workout.kind !== "rest") reasons.unshift(`Personal pattern: ${personal.detail.replace(/\s*\(.*\)$/, "")}, so today's session matters`);
   return [...new Set(reasons)].slice(0, 4).length >= 2
     ? [...new Set(reasons)].slice(0, 4)
     : [...new Set(reasons), "Consistency over weeks matters more than any single session"].slice(0, 4);

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useAthleteProfile } from "../lib/athlete-profile";
-import { buildDailyBriefing, type DailyBriefing } from "../lib/daily-briefing";
+import { buildDailyBriefing, type BriefingMemory, type DailyBriefing } from "../lib/daily-briefing";
 import {
   approveDailyPlan,
   isApprovalCurrent,
@@ -34,7 +34,7 @@ const STATUS_STYLE = {
   "Ahead Of Plan": "text-sky-300",
 } as const;
 
-function readPlan(): PlannedSession[] {
+export function readPlan(): PlannedSession[] {
   try {
     const raw = window.localStorage.getItem(TRAINING_PLAN_STORAGE_KEY);
     return (raw ? normalizeTrainingPlan(JSON.parse(raw)) : null) ?? [];
@@ -91,12 +91,17 @@ export function DailyCoachingPlan() {
       console.error("[daily-plan] Could not load history or recovery", loadError);
     }
 
-    let memories: { category: string; detail: string }[] = [];
+    let memories: BriefingMemory[] = [];
     let approved: { recommendation: string; approvedAt: string | null; targetWorkoutDate: string | null }[] = [];
     if (uid) {
       const since = new Date(now.getTime() - 14 * 86_400_000).toISOString();
       const [memoryResult, recResult] = await Promise.all([
-        supabase.from("coach_memories").select("category,detail").eq("user_id", uid).order("created_at", { ascending: false }).limit(20),
+        supabase
+          .from("coach_memories")
+          .select("category,detail,signal,confidence")
+          .eq("user_id", uid)
+          .order("created_at", { ascending: false })
+          .limit(40),
         supabase
           .from("coach_recommendations")
           .select("recommendation,approved_at,target_workout_date")
@@ -104,7 +109,9 @@ export function DailyCoachingPlan() {
           .eq("status", "approved")
           .gte("approved_at", since),
       ]);
-      memories = memoryResult.data ?? [];
+      memories = memoryResult.error
+        ? ((await supabase.from("coach_memories").select("category,detail").eq("user_id", uid).limit(40)).data ?? [])
+        : memoryResult.data;
       approved = (recResult.data ?? []).map((row) => ({
         recommendation: row.recommendation,
         approvedAt: row.approved_at,

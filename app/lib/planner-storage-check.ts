@@ -32,6 +32,11 @@ export const PLANNER_STORAGE_REQUIREMENTS = [
     migration: "20261020000000_recommendation_supersession.sql",
   },
   {
+    table: "coach_memories",
+    columns: "memory_key,memory_type,signal,confidence,evidence_count,source,updated_at",
+    migration: "20261022000000_athlete_intelligence_memories.sql",
+  },
+  {
     table: "daily_plan_approvals",
     columns: "id,user_id,plan_date,session_id,workout_summary,briefing,approved_at",
     migration: "20261021000000_create_daily_plan_approvals.sql",
