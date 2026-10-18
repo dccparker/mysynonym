@@ -1039,6 +1039,140 @@ function generateTrainingWeekProposal(
   };
 }
 
+function logPlanner(label: string, details: Record<string, unknown>) {
+  if (process.env.NODE_ENV === "test") return;
+  console.info(`[planner] ${label}`, JSON.stringify(details));
+}
+
+function buildFallbackBaseWeek(
+  profile: AthleteProfile,
+  history: HistorySession[],
+  existing: PlannedSession[],
+  now: Date,
+  budgetMinutes: number,
+): PlannedSession[] {
+  const weekStart = localDateString(startOfWeek(now));
+  const weekEnd = dateForPlanDay(weekStart, "Sunday");
+  const today = localDateString(now);
+  const available = availableTypes(profile);
+  if (available.length === 0 || budgetMinutes < 20) return [];
+  // Rest-day preference and a workout already done today are relaxed here:
+  // a minimal week is better than an empty one.
+  const days = normalizeAvailableTrainingDays(profile.availableTrainingDays).filter(
+    (day) =>
+      dateForPlanDay(weekStart, day) >= today &&
+      !existing.some(
+        (session) =>
+          session.day === day &&
+          session.date >= weekStart &&
+          session.date <= weekEnd &&
+          session.status === "Completed",
+      ),
+  );
+  if (days.length === 0) return [];
+  const primary: PlannedActivityType = available.includes("Ride") ? "Ride" : available[0];
+  const run: PlannedActivityType = available.includes("Run") ? "Run" : available[0];
+  const secondary: PlannedActivityType =
+    available.find((type) => type !== primary && type !== run) ?? primary;
+  const name = (type: PlannedActivityType) => (type === "Ride" ? "Bike" : type);
+  type Candidate = {
+    title: string;
+    type: PlannedActivityType;
+    minutes: number;
+    intensity: PlannedIntensity;
+    reason: string;
+  };
+  const candidates = ([
+    { title: `Long ${name(primary)}`, type: primary, minutes: 90, intensity: "Easy", reason: "Base endurance session." },
+    { title: `Easy ${name(run)}`, type: run, minutes: 40, intensity: "Easy", reason: "Easy aerobic base." },
+    { title: `Easy ${name(secondary)}`, type: secondary, minutes: 45, intensity: "Easy", reason: "Easy aerobic base in a second discipline." },
+    { title: "Recovery Session", type: "Other", minutes: 30, intensity: "Recovery", reason: "Gentle movement to support recovery." },
+  ] satisfies Candidate[]).slice(0, days.length) as Candidate[];
+  const total = candidates.reduce((sum, item) => sum + item.minutes, 0);
+  const scale = Math.min(1, budgetMinutes / total);
+  const preferredLong = days.find((day) => day === profile.longWorkoutDay);
+  const longDay =
+    preferredLong ??
+    [...days].reverse().find((day) => day === "Saturday" || day === "Sunday") ??
+    days[days.length - 1];
+  const otherDays = days.filter((day) => day !== longDay);
+  const nowIso = now.toISOString();
+  const limitations = Boolean(profile.currentLimitations.trim());
+  const sessions: PlannedSession[] = [];
+  candidates.forEach((item, index) => {
+    const minutes = Math.floor((item.minutes * scale) / 5) * 5;
+    if (minutes < 20) return;
+    const day = index === 0 ? longDay : otherDays[index - 1];
+    if (!day) return;
+    sessions.push({
+      id: window.crypto.randomUUID(),
+      day,
+      date: dateForPlanDay(weekStart, day),
+      title: item.title,
+      notes: "",
+      reason: item.reason,
+      activities: [
+        activityPrescription(item.type, minutes, item.intensity, profile.trainingExperience, limitations),
+      ],
+      status: "Planned",
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      generated: true,
+    });
+  });
+  return sessions.sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function isGeneratedInWeek(session: PlannedSession, weekStart: string, weekEnd: string) {
+  return session.status !== "Completed" && session.date >= weekStart && session.date <= weekEnd;
+}
+
+function withFallbackWeek(
+  profile: AthleteProfile,
+  history: HistorySession[],
+  existing: PlannedSession[],
+  now: Date,
+  weekStart: string,
+  proposal: { sessions: PlannedSession[]; starterWeek: boolean; explanation: string },
+): { sessions: PlannedSession[]; starterWeek: boolean; explanation: string } {
+  const weekEnd = dateForPlanDay(weekStart, "Sunday");
+  const today = localDateString(now);
+  const generated = proposal.sessions.filter((session) => isGeneratedInWeek(session, weekStart, weekEnd));
+  const availableDays = normalizeAvailableTrainingDays(profile.availableTrainingDays);
+  const completedMinutes = history
+    .filter((session) => session.date >= weekStart && session.date <= today)
+    .reduce((sum, session) => sum + session.activities.reduce((t, a) => t + a.duration, 0), 0);
+  const budget = (profile.weeklyTrainingHours ?? 0) * 60 - completedMinutes;
+  logPlanner("generation result", {
+    today,
+    weekStart,
+    experience: profile.trainingExperience,
+    goal: profile.primaryGoal,
+    weeklyHours: profile.weeklyTrainingHours,
+    availableDays,
+    preferredRestDay: profile.preferredRestDay,
+    equipment: profile.equipment,
+    supportedTypes: availableTypes(profile),
+    goalTypes: goalTypes(profile, availableTypes(profile)),
+    eligibleDaysFromToday: availableDays.filter((day) => dateForPlanDay(weekStart, day) >= today),
+    historyDatesThisWeek: history.filter((s) => s.date >= weekStart).map((s) => s.date),
+    candidates: generated.map((session) => `${session.day}: ${session.title}`),
+    explanation: proposal.explanation,
+  });
+  if (generated.length > 0 || !profile.primaryGoal || !profile.trainingExperience) return proposal;
+  const fallback = buildFallbackBaseWeek(profile, history, existing, now, budget);
+  logPlanner("fallback base week", {
+    reason: "primary generator produced zero sessions",
+    sessions: fallback.map((session) => `${session.day}: ${session.title}`),
+  });
+  if (fallback.length === 0) return proposal;
+  return {
+    sessions: [...proposal.sessions, ...fallback],
+    starterWeek: proposal.starterWeek,
+    explanation: `${proposal.explanation} A minimal base week was created because the full generator produced no sessions.`,
+  };
+}
+
 export function generateTrainingWeek(
   profile: AthleteProfile,
   history: HistorySession[],
@@ -1061,7 +1195,9 @@ export function generateTrainingWeek(
       profile.availableTrainingDays,
       weekStart,
     );
-    if (lastInvalidDays.length === 0) return proposal;
+    if (lastInvalidDays.length === 0) {
+      return withFallbackWeek(profile, history, existing, now, weekStart, proposal);
+    }
   }
   throw new Error(
     `Generated training plan includes unavailable days after repeated attempts: ${lastInvalidDays.join(", ")}.`,
