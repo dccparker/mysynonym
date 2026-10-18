@@ -45,6 +45,8 @@ export type CompletedSession = {
   activities: Array<{ activityType: string; durationMinutes: number }>;
 };
 
+export type CoachPlannerAction = import("./coach-chat-types").CoachPlannerAction;
+
 export function localDateString(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -178,6 +180,195 @@ export function normalizeTrainingPlan(value: unknown): PlannedSession[] | null {
   return new Set(normalized.map((session) => session.id)).size === normalized.length
     ? normalized
     : null;
+}
+
+export function applyCoachPlannerAction(
+  action: CoachPlannerAction,
+  currentPlan: PlannedSession[],
+  profile: AthleteProfile,
+  history: HistorySession[],
+  today = localDateString(new Date()),
+): PlannedSession[] {
+  const nextPlan = structuredClone(currentPlan);
+  if (action.type === "regenerate_rest_of_week") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(action.weekStarting)) {
+      throw new Error("The Coach proposal has an invalid week start date.");
+    }
+    const weekStartDate = new Date(`${action.weekStarting}T00:00:00`);
+    if (
+      Number.isNaN(weekStartDate.getTime()) ||
+      localDateString(startOfWeek(weekStartDate)) !== action.weekStarting
+    ) {
+      throw new Error("The Coach proposal does not start on a Monday.");
+    }
+    const weekEnd = dateForPlanDay(action.weekStarting, "Sunday");
+    const generated = generateTrainingWeek(
+      profile,
+      history,
+      currentPlan,
+      weekStartDate,
+    ).sessions;
+    const windowStart = today > action.weekStarting ? today : action.weekStarting;
+    const inWindow = (session: PlannedSession) =>
+      session.date >= windowStart && session.date <= weekEnd;
+    const keptIds = new Set(
+      currentPlan
+        .filter(
+          (session) =>
+            !inWindow(session) ||
+            session.status === "Completed" ||
+            session.status === "Skipped",
+        )
+        .map((session) => session.id),
+    );
+    const regenerated = [
+      ...currentPlan.filter((session) => keptIds.has(session.id)),
+      ...generated.filter(
+        (session) => inWindow(session) && !keptIds.has(session.id),
+      ),
+    ].filter(
+      (session, index, all) =>
+        all.findIndex((other) => other.id === session.id) === index,
+    );
+    for (const day of weekDays) {
+      const daySessions = regenerated.filter(
+        (session) =>
+          session.date >= action.weekStarting &&
+          session.date <= weekEnd &&
+          session.day === day &&
+          session.status !== "Skipped",
+      );
+      const dailyLimit =
+        day === "Saturday" || day === "Sunday"
+          ? profile.maxWeekendWorkoutMinutes ?? 180
+          : profile.maxWeekdayWorkoutMinutes ?? 120;
+      if (
+        daySessions.reduce((total, session) => total + plannedSessionDuration(session), 0) >
+        dailyLimit
+      ) {
+        throw new Error(`Regeneration would exceed your ${day} training-time limit.`);
+      }
+    }
+    return regenerated;
+  }
+
+  const sessionIndex = nextPlan.findIndex((session) => session.id === action.sessionId);
+  if (sessionIndex < 0) {
+    throw new Error("The planned session in this Coach proposal no longer exists.");
+  }
+  const session = nextPlan[sessionIndex];
+  if (session.status === "Completed") {
+    throw new Error("Completed workouts cannot be changed. Training history remains unchanged.");
+  }
+  if (session.status === "Skipped") {
+    throw new Error("Skipped sessions must be restored in the planner before the Coach can change them.");
+  }
+  if (session.date < today) {
+    throw new Error("Past planned sessions cannot be changed by the Coach.");
+  }
+
+  if (action.type === "move_session") {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(action.targetDate)) {
+      throw new Error("The Coach proposal has an invalid target date.");
+    }
+    const target = new Date(`${action.targetDate}T00:00:00`);
+    if (
+      Number.isNaN(target.getTime()) ||
+      localDateString(target) !== action.targetDate ||
+      action.targetDate < today
+    ) {
+      throw new Error("The workout can only be moved to a valid date from today onward.");
+    }
+    const day = weekDays[(target.getDay() + 6) % 7];
+    if (!profile.availableTrainingDays.includes(day)) {
+      throw new Error(`${day} is not an available training day in your athlete profile.`);
+    }
+    const sameDateMinutes = nextPlan
+      .filter(
+        (item) =>
+          item.id !== session.id &&
+          item.date === action.targetDate &&
+          item.status !== "Skipped",
+      )
+      .reduce((total, item) => total + plannedSessionDuration(item), 0);
+    const dailyLimit =
+      day === "Saturday" || day === "Sunday"
+        ? profile.maxWeekendWorkoutMinutes ?? 180
+        : profile.maxWeekdayWorkoutMinutes ?? 120;
+    if (sameDateMinutes + plannedSessionDuration(session) > dailyLimit) {
+      throw new Error("Moving this session would exceed your daily training-time limit.");
+    }
+    nextPlan[sessionIndex] = {
+      ...session,
+      day,
+      date: action.targetDate,
+      rescheduledFromDay: session.day,
+      modified: true,
+      updatedAt: new Date().toISOString(),
+    };
+  } else if (action.type === "adjust_activity") {
+    const activityIndex = session.activities.findIndex(
+      (activity) => activity.id === action.activityId,
+    );
+    if (activityIndex < 0) {
+      throw new Error("The activity in this Coach proposal no longer exists.");
+    }
+    if (
+      action.durationMinutes === undefined &&
+      action.intensity === undefined
+    ) {
+      throw new Error("The Coach proposal does not include an activity adjustment.");
+    }
+    if (
+      action.durationMinutes !== undefined &&
+      (!Number.isFinite(action.durationMinutes) ||
+        action.durationMinutes < 5 ||
+        action.durationMinutes > 600)
+    ) {
+      throw new Error("The proposed activity duration must be between 5 and 600 minutes.");
+    }
+    nextPlan[sessionIndex] = {
+      ...session,
+      activities: session.activities.map((activity, index) =>
+        index === activityIndex
+          ? {
+              ...activity,
+              ...(action.durationMinutes === undefined
+                ? {}
+                : { durationMinutes: action.durationMinutes }),
+              ...(action.intensity === undefined
+                ? {}
+                : { intensity: action.intensity }),
+            }
+          : activity,
+      ),
+      modified: true,
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
+    if (
+      !action.title.trim() ||
+      action.title.length > 120 ||
+      !action.reason.trim() ||
+      action.reason.length > 240 ||
+      action.activities.length === 0 ||
+      action.activities.length > 6
+    ) {
+      throw new Error("The replacement workout in this Coach proposal is invalid.");
+    }
+    nextPlan[sessionIndex] = {
+      ...session,
+      title: action.title.trim(),
+      reason: action.reason.trim(),
+      activities: action.activities.map((activity) => ({
+        ...activity,
+        id: crypto.randomUUID(),
+      })),
+      modified: true,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return nextPlan;
 }
 
 export function plannedSessionDuration(session: PlannedSession): number {

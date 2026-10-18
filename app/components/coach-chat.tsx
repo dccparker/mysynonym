@@ -8,12 +8,21 @@ import type {
   CoachConversation,
   CoachMessage,
   SavedCoachMemory,
+  SavedCoachPlannerAction,
 } from "../lib/coach-chat-types";
 import {
+  applyCoachPlannerAction,
   localDateString,
   normalizeTrainingPlan,
   TRAINING_PLAN_STORAGE_KEY,
+  type HistorySession,
+  type PlannedSession,
 } from "../lib/training-plan";
+import { useAthleteProfile } from "../lib/athlete-profile";
+import {
+  loadWorkoutHistory,
+  notifyTrainingPlanUpdated,
+} from "../lib/workout-storage";
 
 type ApiResponse<T> = T & { error?: string };
 
@@ -38,6 +47,155 @@ function readCurrentPlanner() {
     throw new Error("Your current planner has an invalid format. Review or refresh your training plan and try again.");
   }
   return planner;
+}
+
+function sessionMinutes(session: PlannedSession) {
+  return session.activities.reduce((total, activity) => total + activity.durationMinutes, 0);
+}
+
+function describeSession(session: PlannedSession) {
+  const intensities = [...new Set(session.activities.map((activity) => activity.intensity))].join("/");
+  return `${session.date} (${session.day}) · ${session.title} · ${sessionMinutes(session)} min · ${intensities}`;
+}
+
+function diffPlans(before: PlannedSession[], after: PlannedSession[]) {
+  const beforeById = new Map(before.map((session) => [session.id, session]));
+  const afterById = new Map(after.map((session) => [session.id, session]));
+  return {
+    removed: before.filter((session) => !afterById.has(session.id)),
+    added: after.filter((session) => !beforeById.has(session.id)),
+    changed: after.flatMap((session) => {
+      const previous = beforeById.get(session.id);
+      return previous && JSON.stringify(previous) !== JSON.stringify(session)
+        ? [{ before: previous, after: session }]
+        : [];
+    }),
+  };
+}
+
+async function loadHistorySessions(): Promise<HistorySession[]> {
+  const entries = await loadWorkoutHistory();
+  const grouped = new Map<string, HistorySession>();
+  entries.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null) return;
+    const item = entry as Record<string, unknown>;
+    if (
+      typeof item.activityType !== "string" ||
+      typeof item.workoutDate !== "string" ||
+      typeof item.duration !== "number"
+    ) {
+      return;
+    }
+    const key = typeof item.sessionId === "string" ? item.sessionId : `legacy-${index}`;
+    const session = grouped.get(key) ?? {
+      date: item.workoutDate,
+      title:
+        typeof item.sessionTitle === "string"
+          ? item.sessionTitle
+          : typeof item.workoutTitle === "string"
+            ? item.workoutTitle
+            : "",
+      activities: [],
+    };
+    session.activities.push({ activityType: item.activityType, duration: item.duration });
+    grouped.set(key, session);
+  });
+  return [...grouped.values()];
+}
+
+function PlannerProposalCard({
+  message,
+  action,
+  error,
+  busy,
+  onApprove,
+  onDismiss,
+}: {
+  message: CoachMessage;
+  action: SavedCoachPlannerAction | undefined;
+  error: string | undefined;
+  busy: boolean;
+  onApprove: () => void;
+  onDismiss: () => void;
+}) {
+  const proposal = message.plannerProposal;
+  if (!proposal) return null;
+  const diff = action ? diffPlans(action.beforePlan, action.afterPlan) : null;
+  const statusLabel: Record<string, string> = {
+    approved: "Approved · applying",
+    applied: "Applied to your planner",
+    stale: "Out of date · your planner changed",
+    rejected: "Dismissed",
+  };
+  return (
+    <div className="mt-2 rounded-xl border border-[#b8f36b]/25 bg-[#0b100e] p-3 text-xs text-[#c2cdc5]">
+      <p className="font-semibold text-[#d6ded8]">Proposed planner change</p>
+      <p className="mt-1 whitespace-pre-wrap break-words">{proposal.rationale}</p>
+      {([
+        ["Assumptions", proposal.assumptions],
+        ["Trade-offs", proposal.tradeOffs],
+        ["Expected downstream effects", proposal.expectedEffects],
+      ] as const).map(([label, items]) =>
+        items.length ? (
+          <div key={label} className="mt-2">
+            <p className="font-semibold text-[#a6b1a9]">{label}</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {items.map((item, index) => <li key={index}>{item}</li>)}
+            </ul>
+          </div>
+        ) : null,
+      )}
+      {diff && (
+        <div className="mt-3 space-y-1 rounded-lg border border-white/[0.08] p-2">
+          <p className="font-semibold text-[#a6b1a9]">Before → after</p>
+          {diff.changed.map(({ before, after }) => (
+            <p key={after.id} className="break-words">
+              <span className="text-red-200">− {describeSession(before)}</span>
+              <br />
+              <span className="text-[#b8f36b]">+ {describeSession(after)}</span>
+            </p>
+          ))}
+          {diff.removed.map((session) => (
+            <p key={session.id} className="break-words text-red-200">− {describeSession(session)}</p>
+          ))}
+          {diff.added.map((session) => (
+            <p key={session.id} className="break-words text-[#b8f36b]">+ {describeSession(session)}</p>
+          ))}
+          {!diff.changed.length && !diff.removed.length && !diff.added.length && (
+            <p>No planner sessions would change.</p>
+          )}
+          <p className="pt-1 text-[10px] text-[#77837a]">
+            Completed sessions and your workout history are never changed.
+          </p>
+        </div>
+      )}
+      {error && <p role="alert" className="mt-2 text-red-200">{error}</p>}
+      {!action && !error && <p className="mt-2 text-[#8c9990]">Preparing preview…</p>}
+      {action && statusLabel[action.status] && (
+        <p className="mt-2 font-semibold text-[#a6b1a9]">{statusLabel[action.status]}</p>
+      )}
+      {action?.status === "pending" && (
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onApprove}
+            className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#182014] disabled:opacity-50"
+          >
+            {busy ? "Working…" : "Approve and apply"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onDismiss}
+            className="rounded-lg border border-white/[0.12] px-3 py-2 text-xs font-semibold text-[#d6ded8] disabled:opacity-50"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 async function requestCoach<T>(
@@ -84,6 +242,11 @@ export function CoachChat() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [memoryActionId, setMemoryActionId] = useState("");
+  const { profile } = useAthleteProfile();
+  const [plannerActions, setPlannerActions] = useState<Record<string, SavedCoachPlannerAction>>({});
+  const [plannerErrors, setPlannerErrors] = useState<Record<string, string>>({});
+  const [plannerBusyId, setPlannerBusyId] = useState("");
+  const previewRequests = useRef(new Set<string>());
   const [error, setError] = useState("");
   const pendingSend = useRef(false);
   const pendingMessageId = useRef("");
@@ -194,6 +357,24 @@ export function CoachChat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isSending]);
 
+  useEffect(() => {
+    if (!profile) return;
+    for (const message of messages) {
+      if (
+        message.role !== "assistant" ||
+        !message.plannerProposal ||
+        message.plannerAction ||
+        previewRequests.current.has(message.id)
+      ) {
+        continue;
+      }
+      previewRequests.current.add(message.id);
+      void createPreview(message);
+    }
+    // createPreview intentionally reads current state when invoked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, profile, accessToken]);
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
@@ -239,6 +420,118 @@ export function CoachChat() {
     } finally {
       pendingSend.current = false;
       setIsSending(false);
+    }
+  }
+
+  async function createPreview(message: CoachMessage) {
+    const proposal = message.plannerProposal;
+    if (!accessToken || !proposal || !profile) return;
+    try {
+      const beforePlan = readCurrentPlanner();
+      const today = localDateString(new Date());
+      const applied = applyCoachPlannerAction(
+        proposal.action,
+        beforePlan,
+        profile,
+        await loadHistorySessions(),
+        today,
+      );
+      const afterPlan = normalizeTrainingPlan(applied);
+      if (!afterPlan) throw new Error("The proposed plan could not be validated.");
+      const result = await requestCoach<{ action: SavedCoachPlannerAction }>(
+        accessToken,
+        "/api/coach/planner-actions",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            operation: "create",
+            sourceMessageId: message.id,
+            today,
+            profile: { availableTrainingDays: profile.availableTrainingDays },
+            beforePlan,
+            afterPlan,
+          }),
+        },
+      );
+      if (activeToken.current !== accessToken) return;
+      setPlannerActions((current) => ({ ...current, [message.id]: result.action }));
+    } catch (previewError) {
+      if (activeToken.current !== accessToken) return;
+      setPlannerErrors((current) => ({
+        ...current,
+        [message.id]:
+          previewError instanceof Error
+            ? `This change cannot be applied: ${previewError.message}`
+            : "This change could not be previewed.",
+      }));
+    }
+  }
+
+  async function approvePlannerAction(messageId: string, action: SavedCoachPlannerAction) {
+    if (!accessToken || plannerBusyId) return;
+    setPlannerBusyId(messageId);
+    setError("");
+    try {
+      const approval = await requestCoach<{ afterPlan: PlannedSession[] }>(
+        accessToken,
+        "/api/coach/planner-actions",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            operation: "approve",
+            actionId: action.id,
+            currentPlan: readCurrentPlanner(),
+          }),
+        },
+      );
+      const afterPlan = normalizeTrainingPlan(approval.afterPlan);
+      if (!afterPlan) throw new Error("The approved plan has an invalid format.");
+      window.localStorage.setItem(TRAINING_PLAN_STORAGE_KEY, JSON.stringify(afterPlan));
+      const stored = readCurrentPlanner();
+      notifyTrainingPlanUpdated();
+      await requestCoach<{ status: string }>(accessToken, "/api/coach/planner-actions", {
+        method: "POST",
+        body: JSON.stringify({ operation: "applied", actionId: action.id, currentPlan: stored }),
+      });
+      if (activeToken.current !== accessToken) return;
+      setPlannerActions((current) => ({
+        ...current,
+        [messageId]: { ...action, status: "applied" },
+      }));
+    } catch (approveError) {
+      if (activeToken.current !== accessToken) return;
+      const text = approveError instanceof Error ? approveError.message : "The planner change could not be applied.";
+      if (text.includes("planner changed")) {
+        setPlannerActions((current) => ({
+          ...current,
+          [messageId]: { ...action, status: "stale" },
+        }));
+      }
+      setError(text);
+    } finally {
+      setPlannerBusyId("");
+    }
+  }
+
+  async function dismissPlannerAction(messageId: string, action: SavedCoachPlannerAction) {
+    if (!accessToken || plannerBusyId) return;
+    setPlannerBusyId(messageId);
+    setError("");
+    try {
+      await requestCoach<{ status: string }>(accessToken, "/api/coach/planner-actions", {
+        method: "POST",
+        body: JSON.stringify({ operation: "reject", actionId: action.id }),
+      });
+      if (activeToken.current !== accessToken) return;
+      setPlannerActions((current) => ({
+        ...current,
+        [messageId]: { ...action, status: "rejected" },
+      }));
+    } catch (dismissError) {
+      if (activeToken.current !== accessToken) return;
+      setError(dismissError instanceof Error ? dismissError.message : "The proposal could not be dismissed.");
+    } finally {
+      setPlannerBusyId("");
     }
   }
 
@@ -342,7 +635,7 @@ export function CoachChat() {
                 Talk with your AI Coach
               </h2>
               <p className="mt-1 text-xs leading-relaxed text-[#9ba79f]">
-                Get advice informed by your athlete profile, training and recovery history, and current plan. This data is shared with the AI provider to answer you; the Coach cannot edit your plan.
+                Get advice informed by your athlete profile, training and recovery history, and current plan. This data is shared with the AI provider to answer you; the Coach can only propose plan changes, which are applied only after you approve them.
               </p>
             </div>
           </div>
@@ -463,6 +756,22 @@ export function CoachChat() {
                         >
                           {message.content}
                         </p>
+                        {message.role === "assistant" && message.plannerProposal && (
+                          <PlannerProposalCard
+                            message={message}
+                            action={plannerActions[message.id] ?? message.plannerAction ?? undefined}
+                            error={plannerErrors[message.id]}
+                            busy={plannerBusyId === message.id}
+                            onApprove={() => {
+                              const action = plannerActions[message.id] ?? message.plannerAction;
+                              if (action) void approvePlannerAction(message.id, action);
+                            }}
+                            onDismiss={() => {
+                              const action = plannerActions[message.id] ?? message.plannerAction;
+                              if (action) void dismissPlannerAction(message.id, action);
+                            }}
+                          />
+                        )}
                         {message.role === "assistant" && message.memoryObservation && (
                           <div className="mt-2 rounded-xl border border-white/[0.08] bg-[#0b100e] p-3 text-xs">
                             {message.memoryObservation.category === "temporary" ? (

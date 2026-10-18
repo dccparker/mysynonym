@@ -3,6 +3,8 @@ import type {
   CoachConversation,
   CoachMemoryObservation,
   CoachMessage,
+  CoachPlannerProposal,
+  SavedCoachPlannerAction,
 } from "./coach-chat-types";
 
 type ConversationRow = {
@@ -18,6 +20,23 @@ type MessageRow = {
   content: string;
   created_at: string;
   memory_observation?: CoachMemoryObservation | null;
+  planner_proposal?: CoachPlannerProposal | null;
+};
+
+type PlannerActionRow = {
+  id: string;
+  source_message_id: string;
+  action: SavedCoachPlannerAction["action"];
+  rationale: string;
+  assumptions: string[];
+  trade_offs: string[];
+  expected_effects: string[];
+  before_snapshot: SavedCoachPlannerAction["beforePlan"];
+  after_snapshot: SavedCoachPlannerAction["afterPlan"];
+  status: SavedCoachPlannerAction["status"];
+  created_at: string;
+  approved_at: string | null;
+  applied_at: string | null;
 };
 
 export class CoachRequestError extends Error {
@@ -48,6 +67,7 @@ function toMessage(row: MessageRow, memorySaved = false): CoachMessage {
     ...(row.memory_observation
       ? { memoryObservation: row.memory_observation, memorySaved }
       : {}),
+    ...(row.planner_proposal ? { plannerProposal: row.planner_proposal } : {}),
   };
 }
 
@@ -96,7 +116,7 @@ export async function loadConversationMessages(
 ): Promise<CoachMessage[]> {
   const { data, error } = await supabase
     .from("coach_messages")
-    .select("id,role,content,created_at,memory_observation")
+    .select("id,role,content,created_at,memory_observation,planner_proposal")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
@@ -105,6 +125,9 @@ export async function loadConversationMessages(
   const rows = (data as MessageRow[]).reverse();
   const proposalIds = rows
     .filter((row) => row.memory_observation)
+    .map((row) => row.id);
+  const plannerProposalIds = rows
+    .filter((row) => row.planner_proposal)
     .map((row) => row.id);
   let savedMessageIds = new Set<string>();
   if (proposalIds.length) {
@@ -117,7 +140,44 @@ export async function loadConversationMessages(
       savedMemories.map((memory) => memory.source_message_id as string),
     );
   }
-  return rows.map((row) => toMessage(row, savedMessageIds.has(row.id)));
+  let plannerActions = new Map<string, PlannerActionRow>();
+  if (plannerProposalIds.length) {
+    const { data: actionRows, error: actionError } = await supabase
+      .from("coach_planner_actions")
+      .select("id,source_message_id,action,rationale,assumptions,trade_offs,expected_effects,before_snapshot,after_snapshot,status,created_at,approved_at,applied_at")
+      .in("source_message_id", plannerProposalIds);
+    if (actionError) {
+      throw new CoachRequestError("Planner proposals could not be loaded.", 500);
+    }
+    plannerActions = new Map(
+      (actionRows as PlannerActionRow[]).map((action) => [
+        action.source_message_id,
+        action,
+      ]),
+    );
+  }
+  return rows.map((row) => {
+    const message = toMessage(row, savedMessageIds.has(row.id));
+    const action = plannerActions.get(row.id);
+    if (!action) return message;
+    message.plannerAction = {
+      ...row.planner_proposal!,
+      id: action.id,
+      sourceMessageId: action.source_message_id,
+      action: action.action,
+      rationale: action.rationale,
+      assumptions: action.assumptions,
+      tradeOffs: action.trade_offs,
+      expectedEffects: action.expected_effects,
+      beforePlan: action.before_snapshot,
+      afterPlan: action.after_snapshot,
+      status: action.status,
+      createdAt: action.created_at,
+      ...(action.approved_at ? { approvedAt: action.approved_at } : {}),
+      ...(action.applied_at ? { appliedAt: action.applied_at } : {}),
+    };
+    return message;
+  });
 }
 
 export async function createConversation(
@@ -175,6 +235,7 @@ export async function addAssistantMessage(
   conversationId: string,
   content: string,
   memoryObservation: CoachMemoryObservation | null,
+  plannerProposal: CoachPlannerProposal | null,
 ): Promise<void> {
   const { error } = await supabase
     .from("coach_messages")
@@ -183,6 +244,7 @@ export async function addAssistantMessage(
       role: "assistant",
       content,
       memory_observation: memoryObservation,
+      planner_proposal: plannerProposal,
     });
   if (error) throw new CoachRequestError("The Coach response could not be saved.", 500);
 }

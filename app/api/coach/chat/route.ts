@@ -122,6 +122,7 @@ export async function POST(request: Request) {
       conversationId,
       reply.content,
       reply.memoryObservation,
+      reply.plannerProposal,
     );
     await releaseConversation(supabase, conversationId);
     claimed = false;

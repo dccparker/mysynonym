@@ -1,4 +1,9 @@
-import type { CoachMemoryObservation } from "./coach-chat-types";
+import type {
+  CoachMemoryObservation,
+  CoachPlannerAction,
+  CoachPlannerProposal,
+} from "./coach-chat-types";
+import type { PlannedIntensity, PlannedActivity } from "./training-plan";
 
 type ModelMessage = {
   role: "user" | "assistant";
@@ -19,7 +24,86 @@ type OpenAIChatCompletion = {
 export type CoachModelReply = {
   content: string;
   memoryObservation: CoachMemoryObservation | null;
+  plannerProposal: CoachPlannerProposal | null;
 };
+
+const activityTypes = ["Run", "Ride", "Swim", "Strength", "Other"] as const;
+const intensities = ["Recovery", "Easy", "Moderate", "Hard", "Rest"] as const;
+
+function parsePlannerAction(value: unknown): CoachPlannerAction | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const action = value as Record<string, unknown>;
+  if (
+    action.type === "regenerate_rest_of_week" &&
+    typeof action.weekStarting === "string"
+  ) {
+    return { type: action.type, weekStarting: action.weekStarting };
+  }
+  if (action.type === "move_session" &&
+      typeof action.sessionId === "string" &&
+      typeof action.targetDate === "string") {
+    return { type: action.type, sessionId: action.sessionId, targetDate: action.targetDate };
+  }
+  if (action.type === "adjust_activity" &&
+      typeof action.sessionId === "string" &&
+      typeof action.activityId === "string" &&
+      (action.durationMinutes === undefined ||
+        (typeof action.durationMinutes === "number" && Number.isFinite(action.durationMinutes))) &&
+      (action.intensity === undefined ||
+        intensities.some((intensity) => intensity === action.intensity))) {
+    if (action.durationMinutes === undefined && action.intensity === undefined) return null;
+    const intensity = intensities.find((item) => item === action.intensity);
+    return {
+      type: action.type,
+      sessionId: action.sessionId,
+      activityId: action.activityId,
+      ...(typeof action.durationMinutes === "number"
+        ? { durationMinutes: action.durationMinutes }
+        : {}),
+      ...(intensity ? { intensity: intensity as PlannedIntensity } : {}),
+    };
+  }
+  if (
+    action.type === "replace_session" &&
+    typeof action.sessionId === "string" &&
+    typeof action.title === "string" &&
+    typeof action.reason === "string" &&
+    Array.isArray(action.activities) &&
+    action.activities.length > 0 &&
+    action.activities.length <= 6
+  ) {
+    const activities = action.activities.map((value) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+      const activity = value as Record<string, unknown>;
+      if (
+        !activityTypes.some((type) => type === activity.activityType) ||
+        !intensities.some((intensity) => intensity === activity.intensity) ||
+        typeof activity.durationMinutes !== "number" ||
+        !Number.isFinite(activity.durationMinutes) ||
+        typeof activity.instructions !== "string" ||
+        typeof activity.purpose !== "string"
+      ) {
+        return null;
+      }
+      return {
+        activityType: activity.activityType,
+        intensity: activity.intensity,
+        durationMinutes: activity.durationMinutes,
+        instructions: activity.instructions,
+        purpose: activity.purpose,
+      };
+    });
+    if (activities.some((activity) => activity === null)) return null;
+    return {
+      type: action.type,
+      sessionId: action.sessionId,
+      title: action.title,
+      reason: action.reason,
+      activities: activities as Omit<PlannedActivity, "id">[],
+    };
+  }
+  return null;
+}
 
 function parseCoachModelReply(value: unknown): CoachModelReply {
   if (typeof value !== "string") {
@@ -63,7 +147,42 @@ function parseCoachModelReply(value: unknown): CoachModelReply {
       }
     }
   }
-  return { content, memoryObservation };
+  let plannerProposal: CoachModelReply["plannerProposal"] = null;
+  if (
+    typeof response.plannerProposal === "object" &&
+    response.plannerProposal !== null &&
+    !Array.isArray(response.plannerProposal)
+  ) {
+    const proposal = response.plannerProposal as Record<string, unknown>;
+    const action = parsePlannerAction(proposal.action);
+    const lines = (entry: unknown) =>
+      Array.isArray(entry) &&
+      entry.length <= 5 &&
+      entry.every((line) => typeof line === "string" && line.trim().length > 0 && line.length <= 300)
+        ? entry.map((line) => line.trim())
+        : null;
+    const assumptions = lines(proposal.assumptions);
+    const tradeOffs = lines(proposal.tradeOffs);
+    const expectedEffects = lines(proposal.expectedEffects);
+    if (
+      action &&
+      typeof proposal.rationale === "string" &&
+      proposal.rationale.trim().length > 0 &&
+      proposal.rationale.length <= 1000 &&
+      assumptions &&
+      tradeOffs &&
+      expectedEffects
+    ) {
+      plannerProposal = {
+        action,
+        rationale: proposal.rationale.trim(),
+        assumptions,
+        tradeOffs,
+        expectedEffects,
+      };
+    }
+  }
+  return { content, memoryObservation, plannerProposal };
 }
 
 export class CoachModelError extends Error {
@@ -135,7 +254,21 @@ For every material recommendation, present in this order, briefly and naturally:
 - Recommendation: a specific, appropriately scaled next step, followed by why it fits.
 If uncertainty is high or an assumption could change safety or the decision, stop before the recommendation and ask a focused question instead. Be concise for simple factual answers, but do not omit this reasoning sequence for training decisions.
 
-Do not claim certainty from sparse logs, invent progress or recovery trends when comparisons are unavailable, or suggest that readiness scores diagnose health. You may explain the current plan but cannot edit it or take app-wide actions. A separate, explicit user confirmation is required before any Coach memory is saved. Avoid medical diagnosis and recommend professional care for pain, injury, illness, or medical concerns.
+Do not claim certainty from sparse logs, invent progress or recovery trends when comparisons are unavailable, or suggest that readiness scores diagnose health. You may explain the current plan but never change it directly: you may only propose a planner change that the user must preview and explicitly approve. You cannot take app-wide actions. A separate, explicit user confirmation is required before any Coach memory is saved. Avoid medical diagnosis and recommend professional care for pain, injury, illness, or medical concerns.
+
+Planner authority:
+- Never change, save, or claim to have changed a plan. You may only return a proposed planner action for the application to preview; explicit user approval is required before it can be applied.
+- Act as a professional coach: default to Recommendation → Explanation → Approval, not Question → Athlete decides. When the athlete raises a planner need (missed session, schedule conflict, fatigue, travel, rescheduling), choose the single best option yourself using their profile (available days, time limits, long-workout day, equipment, limitations), workout history, recovery state, current planner (hard/long session spacing, weekly load) and saved memories, then return it as plannerProposal with the reasoning. Do not present a menu of reschedule options for the athlete to pick from; at most mention in one sentence the main alternative you rejected and why.
+- Ask a question only when the answer would materially change the decision and cannot be inferred from the context: an unknown constraint (travel, equipment, time, injury or pain status, illness, event proximity, a recovery change that is not logged) or a genuine personal preference that context and memories do not reveal. Do not ask about anything already present in the profile, planner, history, recovery data, memories or earlier messages. Ask at most one or two focused questions, and return plannerProposal null only while such a blocking unknown remains. If pain, injury or illness is reported, ask about it before proposing load.
+- State assumptions explicitly in the proposal instead of asking about low-impact details; the athlete approves or rejects, and can then correct an assumption.
+- Propose only one concrete change at a time, using a session ID/date present in the current planner. Do not propose changes to completed sessions, past sessions, or workout history. For regenerating the remaining week, target the Monday date of the current planner week.
+- Include a brief rationale, assumptions, tradeOffs, and expectedEffects. Avoid overstating downstream certainty.
+- Return plannerProposal null for pure advice, for a blocking question as described above, or when no valid session/date exists in the planner.
+- Supported action JSON forms:
+  {"type":"move_session","sessionId":"existing-session-id","targetDate":"YYYY-MM-DD"}
+  {"type":"adjust_activity","sessionId":"existing-session-id","activityId":"existing-activity-id","durationMinutes":45,"intensity":"Easy"}
+  {"type":"replace_session","sessionId":"existing-session-id","title":"Easy aerobic run","reason":"...","activities":[{"activityType":"Run","durationMinutes":40,"intensity":"Easy","instructions":"...","purpose":"..."}]}
+  {"type":"regenerate_rest_of_week","weekStarting":"YYYY-MM-DD"}
 
 Memory behavior:
 - Return at most one memoryObservation, and only for a concrete, important personal detail. Do not extract secrets, credentials, highly sensitive details, or a temporary symptom as a lasting preference.
@@ -146,10 +279,10 @@ Memory behavior:
 - Do not include a save prompt in reply text; the application will show the exact detail and ask "Would you like me to save this to your profile?"
 
 Return only a JSON object with this shape:
-{"reply":"Your conversational response","memoryObservation":null}
+{"reply":"Your conversational response","memoryObservation":null,"plannerProposal":null}
 or
-{"reply":"Your conversational response","memoryObservation":{"category":"temporary","detail":"The athlete is traveling this week."}}
-Use only "temporary", "recurring_preference", or "profile_information" for category. Keep the observation detail exact, concise, and faithful to what the athlete said.
+{"reply":"Your conversational response","memoryObservation":{"category":"temporary","detail":"The athlete is traveling this week."},"plannerProposal":null}
+Use only "temporary", "recurring_preference", or "profile_information" for memory category. Keep the observation detail exact, concise, and faithful to what the athlete said.
 
 Authenticated athlete context (JSON):
 ` +
@@ -157,7 +290,7 @@ Authenticated athlete context (JSON):
         },
         ...messages,
       ],
-      max_completion_tokens: 800,
+      max_completion_tokens: 1800,
       response_format: { type: "json_object" },
     }),
     signal: AbortSignal.timeout(60_000),

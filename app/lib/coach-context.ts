@@ -80,6 +80,7 @@ function parsePlanner(value: unknown): RecordValue[] {
         throw new CoachRequestError("The current planner data is invalid. Refresh the page and try again.", 400);
       }
       return {
+        id: text(rawActivity.id, 80),
         activityType,
         durationMinutes,
         ...(finiteNumber(rawActivity.distance) === undefined
@@ -91,6 +92,7 @@ function parsePlanner(value: unknown): RecordValue[] {
       };
     });
     return {
+      id: text(rawSession.id, 80),
       day,
       date: rawSession.date,
       title: text(rawSession.title, 120) ?? "Training session",
