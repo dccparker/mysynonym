@@ -26,6 +26,7 @@ import {
 } from "./lib/athlete-profile";
 import { TodaysDecision } from "./components/todays-decision";
 import { DailyCoachingPlan } from "./components/daily-coaching-plan";
+import { TomorrowWorkout } from "./components/tomorrow-workout";
 import { CoachInsights } from "./components/coach-insights";
 import { greetingFor } from "./lib/daily-briefing";
 import { DailyRecoveryCheckIn } from "./components/daily-recovery-check-in";
@@ -421,6 +422,8 @@ export default function Home() {
           </header>
 
           <div className="mb-5"><DailyCoachingPlan /></div>
+
+          <div className="mb-5"><TomorrowWorkout /></div>
 
           <div className="mb-5"><CoachInsights /></div>
 

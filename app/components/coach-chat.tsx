@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { compactPlannerForCoach } from "../lib/coach-planner-window";
 import Link from "next/link";
 import { LoaderCircle, MessageCircle, Plus, Send, Trash2 } from "lucide-react";
 import { supabase } from "../lib/supabase";
@@ -113,7 +114,17 @@ async function requestCoach<T>(
       ...init?.headers,
     },
   });
-  const result: unknown = await response.json();
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    console.error("Coach request returned a non-JSON response", { path, status: response.status });
+    throw new Error(
+      response.status === 413
+        ? "Your planner is too large to send to the Coach. Please try again after the update."
+        : `The Coach service returned an unreadable response (status ${response.status}). Please try again.`,
+    );
+  }
   if (
     typeof result !== "object" ||
     result === null ||
@@ -294,7 +305,12 @@ export function CoachChat() {
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = draft.trim();
-    if (!accessToken || !content || pendingSend.current) return;
+    if (!content || pendingSend.current) return;
+    if (!accessToken) {
+      console.error("Coach chat: no access token; the session may have expired.");
+      setError("You are not signed in to the Coach. Refresh the page or sign in again.");
+      return;
+    }
 
     pendingSend.current = true;
     setIsSending(true);
@@ -302,7 +318,8 @@ export function CoachChat() {
     if (!pendingMessageId.current) pendingMessageId.current = window.crypto.randomUUID();
     const clientMessageId = pendingMessageId.current;
     try {
-      const planner = readCurrentPlanner();
+      const plannerToday = localDateString(new Date());
+      const planner = compactPlannerForCoach(readCurrentPlanner(), plannerToday);
       const result = await requestCoach<{
         conversationId: string;
         conversations: CoachConversation[];
@@ -314,7 +331,7 @@ export function CoachChat() {
           clientMessageId,
           content,
           planner,
-          plannerToday: localDateString(new Date()),
+          plannerToday,
         }),
       });
         if (activeToken.current !== accessToken) return;
@@ -327,6 +344,7 @@ export function CoachChat() {
       setDraft("");
       pendingMessageId.current = "";
     } catch (sendError) {
+      console.error("Coach chat send failed:", sendError);
       if (activeToken.current !== accessToken) return;
       if (sendError instanceof CoachApiError && sendError.conversationId) {
         activeConversation.current = sendError.conversationId;

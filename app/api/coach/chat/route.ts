@@ -72,7 +72,7 @@ export async function POST(request: Request) {
     const authenticated = await authenticateCoachRequest(request);
     supabase = authenticated.supabase;
     const contentLength = Number(request.headers.get("content-length") ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 50_000) {
+    if (Number.isFinite(contentLength) && contentLength > 120_000) {
       throw new CoachRequestError("The request body is too large.", 413);
     }
 

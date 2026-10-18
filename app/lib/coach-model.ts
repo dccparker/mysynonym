@@ -4,6 +4,7 @@ import type {
   CoachPlannerProposal,
 } from "./coach-chat-types";
 import { PROPOSAL_DETAIL_PREFIXES } from "./coach-chat-types";
+import { catalogEntry, findUnsafeMedicalClaim, normalizeWorkoutStructure } from "./workout-catalog";
 import { classifyCoachReply, findAmbiguousWording } from "./coach-recommendation-logic";
 import {
   isRecommendationConfidence,
@@ -95,12 +96,14 @@ function parsePlannerAction(value: unknown): CoachPlannerAction | null {
       ) {
         return null;
       }
+      const structure = normalizeWorkoutStructure(activity);
       return {
-        activityType: activity.activityType,
+        activityType: catalogEntry(structure.workoutType)?.activityType ?? activity.activityType,
         intensity: activity.intensity,
         durationMinutes: activity.durationMinutes,
         instructions: activity.instructions,
         purpose: activity.purpose,
+        ...structure,
       };
     });
     if (activities.some((activity) => activity === null)) return null;
@@ -199,7 +202,10 @@ function parseCoachModelReply(value: unknown): CoachModelReply {
       typeof value === "string" && value.trim()
         ? [prefix + value.trim().slice(0, 140)]
         : [];
-    const ambiguity = action ? findAmbiguousWording(action) : null;
+    const ambiguity =
+      (action ? findAmbiguousWording(action) : null) ??
+      why.map((line) => findUnsafeMedicalClaim(line)).find((issue) => issue !== null) ??
+      null;
     if (ambiguity) rejectionReason = ambiguity;
     if (action && why.length && !ambiguity) {
       const recommendationType = isRecommendationType(proposal.recommendationType)
@@ -373,6 +379,8 @@ Planner requests (recommendation-first) override the general "ask before recomme
 - Vague, open or deferring replies ("anything", "you choose", "whatever you think", "something other than rest", "not sure") are delegation: decide for the athlete and return a card now. Never re-ask or offer options after such a reply.
 - An athlete's stated preference ("I'd like to run instead", "I only have 30 minutes", "I want something other than rest") is new information: immediately return a revised plannerProposal that honors it (for example a replace_session to a run) and keep the reply to a short "Recommendation:" line. "I have to miss today's workout" gets a card on the first message: move, shorten, replace or absorb the session using the plan and recent load.
 - Do not end a reply with a question or a menu when a recommendation can be made. Do not ask for confirmation, and do not say "let me know"; the card's Approve and Reject buttons are the only decision step.
+- Structured workouts. Every replace_session activity must use one of these workout types as "workoutType" (the same types used by generated plans and manual workouts), with activityType Run, Ride, Swim, Strength or Other matching the sport (HYROX stations: Strength, or Other for SkiErg, rowing, circuits and simulations): Running: Easy Run, Recovery Run, Long Run, Tempo Run, Threshold Run, Intervals, Hill Repeats, Brick Run. Cycling: Recovery Ride, Zone 2 Ride, Long Ride, Tempo Ride, Threshold Intervals, VO2 Intervals, Brick Ride. Swimming: Technique Swim, Endurance Swim, Recovery Swim, Threshold Swim, Race-Pace Swim, Open-Water Skills. Strength: Full Body, Upper Body, Lower Body, Core Stability, Single-Leg Strength, Hip Stability, Knee-Support Strength, Mobility, Injury Prevention. HYROX: Sled Push, Sled Pull, SkiErg Intervals, Rowing Intervals, Farmers Carry, Sandbag Lunges, Wall Balls, Burpee Broad Jumps, Compromised Running, HYROX Circuit, Race Simulation. Include warmUp, mainSet, coolDown, equipment and, for strength or HYROX work, exercises with sets, reps, distance or load, plus easierOption and harderOption. Use effort (RPE, zones) and never performance target times. Only use equipment the athlete has; HYROX stations need the matching equipment.
+- Discomfort around training: you may suggest reducing running load, substituting a lower-impact aerobic workout (such as Zone 2 Ride, Endurance Swim or Recovery Swim), or adding Mobility, Hip Stability, Knee-Support Strength or Injury Prevention work, framed as adapting training. Never name or guess a diagnosis, never say a workout or exercise will cure, heal, fix or treat pain or an injury, and advise stopping if symptoms worsen and seeing a qualified health professional if discomfort persists.
 - Cards for every change. If your reply proposes a different workout, activity, duration, intensity, date or location than what is planned (including a walk, mobility session, outdoor session or any replacement), you MUST return it as a plannerProposal card. Never describe such a change only in text. Text-only replies are acceptable only when no plan change is needed or the answer is purely informational. Outdoor or indoor location has no field of its own: put it in the replace_session title and instructions (for example "Outdoor recovery walk" or "Indoor bike"). Use replace_session whenever the activity type changes; adjust_activity only changes duration or intensity.
 - One specific workout, never options. Choose exactly one workout. Titles, instructions and purposes must never contain "or" or "/" between activities (such as "Bike or Run" or "Swim or Cycle") and must not use vague wording such as "cardio" or "anything easy". Pick the activity using the current plan, recent completed and missed workouts, upcoming sessions, recovery, profile, equipment, explicit preferences and saved memories. State any needed assumption (for example that an indoor bike is available), lower "confidence" when context is incomplete, and prefer a conservative specific choice. Example: "45-minute moderate indoor bike" with why: "Adds aerobic work with lower impact than running", "Accounts for recently missed training", "Protects the next planned session". If the athlete asks for something harder, choose one specific moderate workout.
 - Pending recommendation continuity. The context ends with ACTIVE_PENDING_RECOMMENDATION: the card the athlete currently sees and has not decided, or "none". Interpret every new athlete message relative to it. If the message changes feasibility or preference (weather, "it just started raining", time, equipment, energy, "something harder", "I'd like to run instead"), return a NEW plannerProposal that targets the same session and replaces it, and open the reply with why, for example: "Since outdoor training is no longer suitable, I've revised the recommendation to a 45-minute moderate indoor bike." The app marks the old card superseded and shows the new card. Never refer to an earlier text-only suggestion as the active plan; the only active plan is the pending card (or the unchanged planner). If the message does not affect the pending recommendation, do not create a new card and, if relevant, remind the athlete in one sentence to use Approve or Reject on the card. Only one actionable recommendation can be pending per workout.
@@ -383,7 +391,7 @@ Planner requests (recommendation-first) override the general "ask before recomme
 - Supported action JSON forms (inside plannerProposal.action):
   {"type":"move_session","sessionId":"existing-session-id","targetDate":"YYYY-MM-DD"}
   {"type":"adjust_activity","sessionId":"existing-session-id","activityId":"existing-activity-id","durationMinutes":45,"intensity":"Easy"}
-  {"type":"replace_session","sessionId":"existing-session-id","title":"Easy aerobic run","reason":"...","activities":[{"activityType":"Run","durationMinutes":40,"intensity":"Easy","instructions":"...","purpose":"..."}]}
+  {"type":"replace_session","sessionId":"existing-session-id","title":"Zone 2 Ride","reason":"...","activities":[{"workoutType":"Zone 2 Ride","activityType":"Ride","durationMinutes":40,"intensity":"Easy","instructions":"...","purpose":"...","warmUp":"...","mainSet":"...","coolDown":"...","equipment":["Bike"],"exercises":[{"name":"...","sets":3,"reps":"10","distance":"...","load":"..."}],"easierOption":"...","harderOption":"..."}]}
   {"type":"regenerate_rest_of_week","weekStarting":"YYYY-MM-DD"}
 - Full proposal shape: "plannerProposal":{"action":{...},"recommendationType":"missed_workout","confidence":"high","impact":{"weeklyVolume":"...","recovery":"...","fitnessProgression":"...","goalProgression":"..."},"why":["..."],"evidence":["..."],"assumptions":["..."],"uncertainty":["..."],"tradeOffs":["..."],"expectedEffects":["..."],"alternativeConsidered":"..."}
 

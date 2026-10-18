@@ -1,5 +1,12 @@
 import type { AthleteProfile } from "./athlete-profile";
 import { normalizeAvailableTrainingDays, weekDays } from "./athlete-profile";
+import { localDateString } from "./week-days";
+import { activityPrescription, availableTypes, goalTypes } from "./training-activities";
+import { horizonForWeek } from "./training-horizon";
+import { enrichActivities } from "./workout-selection";
+import { normalizeWorkoutStructure, catalogEntry, type WorkoutStructure } from "./workout-catalog";
+export { activityPrescription, availableTypes, goalTypes };
+export type { WorkoutExercise } from "./workout-catalog";
 export {
   TRAINING_PLAN_STORAGE_KEY,
   TRAINING_PLAN_UPDATED_EVENT,
@@ -10,7 +17,7 @@ export type PlannedActivityType = "Run" | "Ride" | "Swim" | "Strength" | "Other"
 export type PlannedIntensity = "Recovery" | "Easy" | "Moderate" | "Hard" | "Rest";
 export type PlannedStatus = "Planned" | "Completed" | "Missed" | "Skipped";
 
-export type PlannedActivity = {
+export type PlannedActivity = WorkoutStructure & {
   id: string;
   activityType: PlannedActivityType;
   durationMinutes: number;
@@ -36,6 +43,7 @@ export type PlannedSession = {
   createdAt: string;
   updatedAt: string;
   generated?: boolean;
+  weekType?: "Load" | "Recovery";
 };
 
 export type CompletedSession = {
@@ -47,12 +55,7 @@ export type CompletedSession = {
 
 export type CoachPlannerAction = import("./coach-chat-types").CoachPlannerAction;
 
-export function localDateString(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+export { localDateString };
 
 export function startOfWeek(date: Date): Date {
   const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -88,10 +91,13 @@ function normalizeActivity(value: unknown): PlannedActivity | null {
   ) {
     return null;
   }
+  const structure = normalizeWorkoutStructure(value);
+  const catalogType = catalogEntry(structure.workoutType)?.activityType;
   return {
     id: value.id,
-    activityType,
+    activityType: catalogType ?? activityType,
     durationMinutes: value.durationMinutes,
+    ...structure,
     ...(typeof value.distance === "number" && Number.isFinite(value.distance)
       ? { distance: value.distance }
       : {}),
@@ -169,6 +175,7 @@ export function normalizePlannedSession(value: unknown): PlannedSession | null {
         ? value.updatedAt
         : createdAt,
     ...(value.generated === true ? { generated: true } : {}),
+    ...(value.weekType === "Recovery" || value.weekType === "Load" ? { weekType: value.weekType } : {}),
   };
 }
 
@@ -489,118 +496,6 @@ export function findUnavailablePlanDays(
         .map((session) => session.day),
     ),
   ];
-}
-
-function availableTypes(profile: AthleteProfile): PlannedActivityType[] {
-  const equipment = new Set(profile.equipment);
-  const available: PlannedActivityType[] = [];
-  if (equipment.has("Running access") || equipment.has("Treadmill")) available.push("Run");
-  if (equipment.has("Road bike") || equipment.has("Indoor bike trainer")) available.push("Ride");
-  if (equipment.has("Pool access") || equipment.has("Open-water swimming access")) available.push("Swim");
-  if (equipment.has("Gym access") || equipment.has("Strength equipment")) available.push("Strength");
-  return available;
-}
-
-function goalTypes(profile: AthleteProfile, available: PlannedActivityType[]): PlannedActivityType[] {
-  const preferredMap: Record<string, PlannedActivityType> = {
-    Running: "Run",
-    Cycling: "Ride",
-    Swimming: "Swim",
-    "Strength training": "Strength",
-  };
-  const preferred = profile.preferredActivities
-    .map((activity) => preferredMap[activity])
-    .filter((activity): activity is PlannedActivityType => Boolean(activity));
-  const goal = profile.primaryGoal;
-  const isTriathlonGoal = ["Ironman", "Half Ironman", "Triathlon"].includes(goal);
-  const target =
-    isTriathlonGoal
-      ? ["Swim", "Ride", "Run", "Strength"]
-      : goal === "Cycling Event"
-        ? ["Ride", "Strength", "Run"]
-        : ["Marathon", "Half Marathon"].includes(goal)
-          ? ["Run", "Strength", "Ride"]
-          : goal === "Strength"
-            ? ["Strength", "Run", "Ride"]
-            : goal === "HYROX"
-              ? ["Run", "Strength", "Ride"]
-              : preferred.length
-                ? preferred
-                : ["Run", "Ride", "Strength"];
-  const dislikedMap: Record<string, PlannedActivityType> = {
-    Running: "Run",
-    Cycling: "Ride",
-    Swimming: "Swim",
-    "Strength training": "Strength",
-  };
-  const disliked = new Set(profile.dislikedActivities.map((activity) => dislikedMap[activity]));
-  const supported = target.filter(
-    (activity): activity is PlannedActivityType =>
-      available.includes(activity as PlannedActivityType) &&
-      (isTriathlonGoal && ["Swim", "Ride", "Run"].includes(activity)
-        ? true
-        : !disliked.has(activity as PlannedActivityType)),
-  );
-  const preferredOrder = new Map(preferred.map((activity, index) => [activity, index]));
-  return [...new Set(supported)].sort((left, right) => {
-        if (isTriathlonGoal && left === "Strength") return 1;
-        if (isTriathlonGoal && right === "Strength") return -1;
-        return (
-          (preferredOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
-          (preferredOrder.get(right) ?? Number.MAX_SAFE_INTEGER)
-        );
-      });
-}
-
-function activityPrescription(
-  type: PlannedActivityType,
-  durationMinutes: number,
-  intensity: PlannedIntensity,
-  experience: AthleteProfile["trainingExperience"],
-  hasCurrentLimitations: boolean,
-): PlannedActivity {
-  const instructionsByType: Record<PlannedActivityType, string> = {
-    Run:
-      intensity === "Hard"
-        ? "After an easy warm-up, use short faster efforts while staying in control, then cool down."
-        : "Run at a comfortable effort where you can speak in full sentences.",
-    Ride:
-      intensity === "Hard"
-        ? "After an easy warm-up, use short stronger efforts with easy spinning between them."
-        : "Ride at a comfortable effort where conversation remains easy.",
-    Swim:
-      intensity === "Hard"
-        ? "After an easy warm-up, swim short faster repeats with relaxed recovery between them."
-        : "Swim relaxed lengths and pause as needed to keep your technique comfortable.",
-    Strength:
-      intensity === "Hard"
-        ? "Use familiar strength movements with controlled repetitions and stop before form breaks down."
-        : "Practice familiar strength movements with controlled, comfortable repetitions.",
-    Other:
-      intensity === "Recovery"
-        ? "Take an easy walk or do gentle mobility. Finish feeling as comfortable as when you started."
-        : "Choose familiar movement that fits the planned effort and duration.",
-  };
-  const easyPurpose =
-    type === "Strength"
-      ? "Maintain strength with manageable effort."
-      : "Build consistency without making the next session harder.";
-  const purpose =
-    intensity === "Hard"
-      ? "Practice brief, faster efforts while keeping the total session controlled."
-      : type === "Swim"
-        ? "Practice relaxed movement and comfortable technique."
-        : easyPurpose;
-  return {
-    id: window.crypto.randomUUID(),
-    activityType: type,
-    durationMinutes,
-    intensity: experience === "Beginner" && intensity === "Hard" ? "Moderate" : intensity,
-    instructions: hasCurrentLimitations
-      ? `${instructionsByType[type]} Keep within your comfortable range and stop if symptoms worsen.`
-      : instructionsByType[type],
-    purpose,
-  };
 }
 
 function generateTrainingWeekProposal(
@@ -1173,6 +1068,23 @@ function withFallbackWeek(
   };
 }
 
+// Gives generated coarse activities a sport-specific workout type and structure.
+function enrichGeneratedSessions(
+  sessions: PlannedSession[],
+  profile: AthleteProfile,
+  weekStart: string,
+  variation: number,
+): PlannedSession[] {
+  const phase = horizonForWeek(profile, weekStart)?.phase ?? "Base";
+  let strengthIndex = 0;
+  return sessions.map((session) => {
+    if (!session.generated || session.activities.every((activity) => activity.workoutType)) return session;
+    const result = enrichActivities(session.activities, session.title, { profile, phase, variation }, strengthIndex);
+    strengthIndex += session.activities.filter((activity) => activity.activityType === "Strength").length;
+    return { ...session, title: result.title, activities: result.activities };
+  });
+}
+
 export function generateTrainingWeek(
   profile: AthleteProfile,
   history: HistorySession[],
@@ -1196,7 +1108,8 @@ export function generateTrainingWeek(
       weekStart,
     );
     if (lastInvalidDays.length === 0) {
-      return withFallbackWeek(profile, history, existing, now, weekStart, proposal);
+      const week = withFallbackWeek(profile, history, existing, now, weekStart, proposal);
+      return { ...week, sessions: enrichGeneratedSessions(week.sessions, profile, weekStart, variationIndex) };
     }
   }
   throw new Error(

@@ -25,6 +25,12 @@ const equipmentOptions = [
   "Open-water swimming access",
   "Gym access",
   "Strength equipment",
+  "Sled",
+  "SkiErg",
+  "Rowing machine",
+  "Sandbag",
+  "Wall ball",
+  "Farmers carry weights",
 ] as const;
 
 function ProfileSection({

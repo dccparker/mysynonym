@@ -24,6 +24,7 @@ import {
   rejectRecommendation,
   REJECTION_MESSAGE,
 } from "../../../lib/coach-recommendations";
+import { catalogEntry, findUnsafeMedicalClaim, normalizeWorkoutStructure } from "../../../lib/workout-catalog";
 import { isMissingStorageError } from "../../../lib/planner-storage-check";
 import type {
   CoachPlannerAction,
@@ -165,7 +166,7 @@ function validDate(value: unknown): value is string {
 }
 
 function parsePlan(value: unknown): PlannedSession[] {
-  if (!Array.isArray(value) || value.length > 100) {
+  if (!Array.isArray(value) || value.length > 200) {
     throw new CoachRequestError("The planner snapshot is invalid.", 400);
   }
   const sessions = value.map((raw) => {
@@ -300,9 +301,11 @@ function parseProposal(value: unknown): CoachPlannerProposal {
       ) {
         throw new CoachRequestError("The proposed replacement activities are invalid.", 400);
       }
+      const structure = normalizeWorkoutStructure(entry);
       return {
         id: "",
-        activityType: entry.activityType as PlannedActivity["activityType"],
+        ...structure,
+        activityType: (catalogEntry(structure.workoutType)?.activityType ?? entry.activityType) as PlannedActivity["activityType"],
         intensity: entry.intensity as PlannedActivity["intensity"],
         durationMinutes: entry.durationMinutes,
         instructions: entry.instructions,
@@ -324,7 +327,11 @@ function parseProposal(value: unknown): CoachPlannerProposal {
   } else {
     throw new CoachRequestError("The proposed planner action is not supported.", 400);
   }
-  const ambiguity = findAmbiguousWording(parsedAction);
+  const ambiguity =
+    findAmbiguousWording(parsedAction) ??
+    findUnsafeMedicalClaim(value.rationale) ??
+    (value.assumptions as string[]).map((line) => findUnsafeMedicalClaim(line)).find((issue) => issue !== null) ??
+    null;
   if (ambiguity) {
     throw new CoachRequestError(
       `The Coach proposed an unclear workout (${ambiguity}). Ask the Coach for a specific workout.`,
@@ -549,7 +556,7 @@ async function loadAction(
 
 async function readPayload(request: Request): Promise<Record<string, unknown>> {
   const length = Number(request.headers.get("content-length") ?? 0);
-  if (Number.isFinite(length) && length > 200_000) {
+  if (Number.isFinite(length) && length > 1_000_000) {
     throw new CoachRequestError("The planner proposal is too large.", 413);
   }
   let payload: unknown;

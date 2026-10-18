@@ -8,6 +8,8 @@ import {
   useAthleteProfile,
   weekDays,
 } from "../lib/athlete-profile";
+import { loadRecoveryCheckIns } from "../lib/recovery-checkin";
+import { buildWorkoutActivity, catalogEntry } from "../lib/workout-catalog";
 import { loadWorkoutHistory, WORKOUTS_UPDATED_EVENT } from "../lib/workout-storage";
 import { supabase } from "../lib/supabase";
 import {
@@ -28,6 +30,16 @@ import {
   type PlannedIntensity,
   type PlannedSession,
 } from "../lib/training-plan";
+import type { PlannerViewMode } from "../lib/training-horizon";
+import { generateTrainingBlock, type BlockWeek } from "../lib/training-block";
+import {
+  BlockPreview,
+  PlannerHorizonCalendar,
+  PlannerViewSelector,
+  RoadmapView,
+  TrainingFocusBanner,
+} from "./planner-horizon";
+import { WorkoutStructureDetails, WorkoutStructureEditor, WorkoutTypeSelect } from "./workout-structure";
 const inputClass =
   "min-h-10 rounded-lg border border-white/[0.08] bg-[#0b100e] px-3 text-sm text-[#e5ebe6] outline-none placeholder:text-[#56625b] focus:border-[#b8f36b]/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b]";
 const labelClass = "grid gap-2 text-xs font-medium text-[#a6b1a9]";
@@ -39,6 +51,9 @@ const newId = () => `plan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+const isAutoTitle = (value: string) =>
+  Boolean(catalogEntry(value)) || workoutTypes.some((type) => type === value);
 
 function displayDuration(minutes: number): string {
   const hours = Math.floor(minutes / 60);
@@ -90,6 +105,33 @@ function PlannedWorkoutForm({
       purpose: "Build consistency without making the next session harder.",
     }],
   );
+  const { profile } = useAthleteProfile();
+  const updateActivity = (id: string, patch: Partial<PlannedActivity>) =>
+    setActivities((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  function selectWorkoutType(activity: PlannedActivity, workoutType: string) {
+    if (!workoutType) {
+      updateActivity(activity.id, {
+        workoutType: undefined,
+        warmUp: undefined,
+        mainSet: undefined,
+        coolDown: undefined,
+        equipment: undefined,
+        exercises: undefined,
+        easierOption: undefined,
+        harderOption: undefined,
+      });
+      return;
+    }
+    const entry = catalogEntry(workoutType);
+    const built = buildWorkoutActivity(workoutType, activity.durationMinutes > 0 ? activity.durationMinutes : 45, {
+      experience: profile?.trainingExperience ?? "",
+      hasLimitations: Boolean(profile?.currentLimitations.trim()),
+      id: activity.id,
+    });
+    if (!entry || !built) return;
+    updateActivity(activity.id, { ...built, distance: activity.distance });
+    setTitle((current) => (current.trim() && !isAutoTitle(current) ? current : workoutType));
+  }
   const [title, setTitle] = useState(initial?.title ?? "");
   const [reason, setReason] = useState(initial?.reason ?? "");
   const [notes, setNotes] = useState(initial?.notes ?? "");
@@ -104,13 +146,16 @@ function PlannedWorkoutForm({
     onSave({
       day: plannedDay,
       date: dateForPlanDay(localDateString(startOfWeek(new Date())), plannedDay),
-      title: title.trim() || activities.map((activity) => activity.activityType).join(" + "),
+      title: title.trim() || activities.map((activity) => activity.workoutType ?? activity.activityType).join(" + "),
       notes: notes.trim(),
       reason:
         reason.trim() ||
         "Supports the athlete's training goal within the available training time.",
       activities: activities.map((activity) => ({
         ...activity,
+        ...(activity.exercises
+          ? { exercises: activity.exercises.filter((exercise) => exercise.name.trim()) }
+          : {}),
         instructions:
           activity.instructions.trim() ||
           "Keep the effort controlled and adjust the session to stay comfortable.",
@@ -192,24 +237,24 @@ function PlannedWorkoutForm({
             <p className="text-[10px] font-semibold text-[#a6b1a9] sm:col-span-2">
               Activity {index + 1}
             </p>
-            <label className={labelClass}>
-              Activity Type
-              <select
-                className={inputClass}
-                onChange={(event) =>
-                  setActivities((current) =>
-                    current.map((item) =>
-                      item.id === activity.id
-                        ? { ...item, activityType: event.currentTarget.value as PlannedActivityType }
-                        : item,
-                    ),
-                  )
-                }
-                value={activity.activityType}
-              >
-                {workoutTypes.map((type) => <option key={type}>{type}</option>)}
-              </select>
-            </label>
+            <WorkoutTypeSelect
+              onChange={(workoutType) => selectWorkoutType(activity, workoutType)}
+              value={activity.workoutType}
+            />
+            {!activity.workoutType && (
+              <label className={labelClass}>
+                Activity Type
+                <select
+                  className={inputClass}
+                  onChange={(event) =>
+                    updateActivity(activity.id, { activityType: event.currentTarget.value as PlannedActivityType })
+                  }
+                  value={activity.activityType}
+                >
+                  {workoutTypes.map((type) => <option key={type}>{type}</option>)}
+                </select>
+              </label>
+            )}
             <label className={labelClass}>
               Duration (minutes)
               <input
@@ -284,6 +329,7 @@ function PlannedWorkoutForm({
                 value={activity.purpose}
               />
             </label>
+            <WorkoutStructureEditor activity={activity} onChange={(patch) => updateActivity(activity.id, patch)} />
             {activities.length > 1 && (
               <button
                 className="justify-self-start text-[10px] text-[#f0b47c] sm:col-span-2"
@@ -325,7 +371,7 @@ function PlannedWorkoutForm({
           value={notes}
         />
       </label>
-      <div className="flex flex-wrap gap-2">
+      <div className="sticky bottom-0 -mx-4 flex flex-wrap gap-2 border-t border-white/[0.07] bg-[#111714] px-4 py-3 sm:-mx-5 sm:px-5">
         <button
           className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#102010] hover:bg-[#c8f78b] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#b8f36b]"
           type="submit"
@@ -349,6 +395,7 @@ export function WeeklyTrainingPlan() {
   const [plannedSessions, setPlannedSessions] = useState<PlannedSession[]>([]);
   const [completedSessions, setCompletedSessions] = useState<CompletedSession[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [lowRecovery, setLowRecovery] = useState(false);
   const [isWorkoutHistoryLoaded, setIsWorkoutHistoryLoaded] = useState(false);
   const [today, setToday] = useState("");
   const [editing, setEditing] = useState<{ day: PlannedSession["day"]; id?: string } | null>(null);
@@ -365,6 +412,8 @@ export function WeeklyTrainingPlan() {
   const [storageError, setStorageError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [feedback, setFeedback] = useState("");
+  const [viewMode, setViewMode] = useState<PlannerViewMode>("1w");
+  const [blockWeeks, setBlockWeeks] = useState<BlockWeek[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -721,6 +770,21 @@ export function WeeklyTrainingPlan() {
       hasSupportedActivity,
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    loadRecoveryCheckIns()
+      .then((checkIns) => {
+        const latest = checkIns[0];
+        if (cancelled || !latest) return;
+        const ageDays = (Date.now() - new Date(`${latest.date}T00:00:00`).getTime()) / 86_400_000;
+        setLowRecovery(latest.readinessCategory === "Low" && ageDays <= 3);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function createProposal(variation: number) {
     if (!profile) return null;
     const result = generateTrainingWeek(
@@ -747,7 +811,34 @@ export function WeeklyTrainingPlan() {
         `Generated proposal was rejected because it included unavailable days: ${invalidDays.join(", ")}.`,
       );
     }
-    return result;
+    const currentWeekMinutes = result.sessions
+      .filter((session) => session.date >= weekStart && session.date <= weekEnd && session.status !== "Skipped")
+      .reduce((sum, session) => sum + plannedSessionDuration(session), 0);
+    const block = generateTrainingBlock(
+      profile,
+      completedSessions.map((session) => ({
+        date: session.date,
+        title: session.title,
+        activities: session.activities.map((activity) => ({
+          activityType: activity.activityType,
+          duration: activity.durationMinutes,
+        })),
+      })),
+      currentWeekMinutes,
+      new Date(),
+      variation,
+      undefined,
+      { lowRecovery },
+    );
+    const keptManual = plansWithStatus.filter(
+      (session) => session.date > weekEnd && !session.generated && session.status === "Planned",
+    );
+    return {
+      ...result,
+      sessions: [...result.sessions, ...keptManual, ...block.sessions],
+      explanation: `${result.explanation} ${block.explanation}`,
+      blockWeeks: block.weeks,
+    };
   }
 
   function proposalSignature(sessions: PlannedSession[]): string {
@@ -842,10 +933,11 @@ export function WeeklyTrainingPlan() {
       const generated = createProposal(0);
       if (!generated) return;
       setReviewSessions(generated.sessions);
+      setBlockWeeks(generated.blockWeeks);
       setStarterWeek(generated.starterWeek);
       setGenerationExplanation(generated.explanation);
       setProposalIndex(0);
-      setProposalNotice("A new training week has been generated for review.");
+      setProposalNotice("A new training block has been generated for review.");
     } catch (error) {
       setGenerationError(
         error instanceof Error
@@ -869,6 +961,7 @@ export function WeeklyTrainingPlan() {
           !isMeaningfullyDifferent(reviewSessions, generated.sessions)
         ) continue;
         setReviewSessions(generated.sessions);
+        setBlockWeeks(generated.blockWeeks);
         setStarterWeek(generated.starterWeek);
         setGenerationExplanation(generated.explanation);
         setProposalIndex(nextIndex);
@@ -901,9 +994,9 @@ export function WeeklyTrainingPlan() {
       return;
     }
     const linkedSessions = matchPlannedSessions(reviewSessions, completedSessions, today);
-    if (persist(linkedSessions, "Your training week was saved.")) {
+    if (persist(linkedSessions, "Your training block was saved.")) {
       setReviewSessions(null);
-      setFeedback("Your training week was saved.");
+      setFeedback("Your training block was saved.");
     }
   }
 
@@ -1103,7 +1196,7 @@ export function WeeklyTrainingPlan() {
             type="button"
           >
             <RefreshCw aria-hidden="true" size={14} />
-            Generate My Week
+            Generate Training Block
           </button>
           <button
             className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-white/[0.09] px-3 py-2 text-[10px] font-medium text-[#a6b1a9] hover:border-[#b8f36b]/25 hover:text-[#c5ef97]"
@@ -1204,7 +1297,7 @@ export function WeeklyTrainingPlan() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-[#eef2ed]" id="review-week-heading">
-                Review your week · Proposal {proposalIndex + 1}
+                Review your training block · Proposal {proposalIndex + 1}
               </h3>
               <p className="mt-1 text-[10px] font-medium text-[#c5ef97]">
                 {proposalNotice}
@@ -1222,14 +1315,14 @@ export function WeeklyTrainingPlan() {
                 onClick={saveGeneratedWeek}
                 type="button"
               >
-                Save Week
+                Save Block
               </button>
               <button
                 className="rounded-lg border border-white/[0.08] px-3 py-2 text-xs text-[#c5ef97]"
                 onClick={regenerateWeek}
                 type="button"
               >
-                Regenerate Week
+                Regenerate Block
               </button>
               <button
                 className="rounded-lg border border-white/[0.08] px-3 py-2 text-xs text-[#a6b1a9]"
@@ -1242,7 +1335,7 @@ export function WeeklyTrainingPlan() {
           </div>
           {schedulableCurrentWeekPlans.some((session) => session.status !== "Completed") && (
             <p className="mt-3 rounded-md border border-[#f0b47c]/15 bg-[#f0b47c]/[0.05] p-2.5 text-[10px] text-[#f0c49d]">
-              Generating a new week will replace the remaining uncompleted workouts in this week&apos;s plan. Completed sessions will not be deleted.
+              Generating a training block will replace the remaining uncompleted workouts in this week and generated workouts in later weeks. Completed sessions and workouts you added manually to later weeks are kept.
             </p>
           )}
           <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
@@ -1260,6 +1353,7 @@ export function WeeklyTrainingPlan() {
               </div>
             ))}
           </div>
+          <BlockPreview weeks={blockWeeks} />
           <ul className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {weekDays.map((day) => {
               const daySessions = reviewWeekSessions.filter((session) => session.day === day);
@@ -1274,7 +1368,7 @@ export function WeeklyTrainingPlan() {
                     {session.activities.map((activity) => (
                       <div className="mt-2" key={activity.id}>
                         <p className="text-[10px] text-[#a6b1a9]">
-                          {activity.activityType} · {displayDuration(activity.durationMinutes)}
+                          {activity.workoutType ?? activity.activityType} · {displayDuration(activity.durationMinutes)}
                         </p>
                         <p className="mt-1 text-[9px] leading-relaxed text-[#87938b]">
                           <span className="font-semibold">Expected effort:</span> {displayEffort(activity.intensity)}
@@ -1285,6 +1379,7 @@ export function WeeklyTrainingPlan() {
                         <p className="mt-1 text-[9px] leading-relaxed text-[#78857d]">
                           <span className="font-semibold">Purpose:</span> {activity.purpose}
                         </p>
+                        <WorkoutStructureDetails activity={activity} />
                       </div>
                     ))}
                     {session.reason && (
@@ -1323,6 +1418,15 @@ export function WeeklyTrainingPlan() {
         </p>
       )}
 
+      <div className="mt-4 grid gap-3">
+        <PlannerViewSelector mode={viewMode} onChange={setViewMode} />
+        {viewMode !== "roadmap" && <TrainingFocusBanner date={weekStart} profile={profile} />}
+      </div>
+      {viewMode === "2w" || viewMode === "4w" ? (
+        <PlannerHorizonCalendar mode={viewMode} onGenerate={generateWeek} profile={profile} sessions={plansWithStatus} today={today} />
+      ) : viewMode === "roadmap" ? (
+        <RoadmapView onGenerate={generateWeek} profile={profile} sessions={plansWithStatus} today={today} />
+      ) : (
       <div className="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-[repeat(7,minmax(0,1fr))]">
         {plansByDay.map(({ day, plans: dayPlans }) => {
           const isLongWorkoutDay = profile?.longWorkoutDay === day;
@@ -1385,7 +1489,7 @@ export function WeeklyTrainingPlan() {
                         {workout.activities.map((activity) => (
                           <div className="min-w-0 rounded-md border border-white/[0.05] bg-[#0b100e]/60 p-2" key={activity.id}>
                             <p className="text-[10px] font-medium text-[#dce4dd]">
-                              {activity.activityType} · {displayDuration(activity.durationMinutes)}
+                              {activity.workoutType ?? activity.activityType} · {displayDuration(activity.durationMinutes)}
                             </p>
                             <p className="mt-1 break-words text-[9px] leading-relaxed text-[#87938b]">
                               <span className="font-semibold">Expected effort:</span> {displayEffort(activity.intensity)}
@@ -1396,6 +1500,12 @@ export function WeeklyTrainingPlan() {
                             <p className="mt-1 break-words text-[9px] leading-relaxed text-[#78857d]">
                               <span className="font-semibold">Purpose:</span> {activity.purpose}
                             </p>
+                            {activity.workoutType && (
+                              <details className="mt-1.5">
+                                <summary className="cursor-pointer text-[10px] font-semibold text-[#c5ef97]">Workout details</summary>
+                                <WorkoutStructureDetails activity={activity} />
+                              </details>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1557,6 +1667,7 @@ export function WeeklyTrainingPlan() {
           );
         })}
       </div>
+      )}
       {!isLoaded && (
         <p className="mt-3 text-[10px] text-[#78857d]" role="status">
           Loading weekly plan…
@@ -1664,17 +1775,17 @@ export function WeeklyTrainingPlan() {
 
       {editing && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2 sm:p-4"
           onClick={() => setEditing(null)}
         >
           <section
             aria-labelledby="planned-workout-dialog-title"
             aria-modal="true"
-            className="w-full max-w-lg rounded-xl border border-white/[0.1] bg-[#111714] p-5 shadow-2xl sm:p-6"
+            className="flex max-h-[calc(100dvh-1rem)] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-white/[0.1] bg-[#111714] shadow-2xl sm:max-h-[calc(100dvh-2rem)]"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
           >
-            <div className="mb-4 flex items-start justify-between gap-3">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/[0.07] p-4 sm:p-5">
               <div>
                 <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#748078]">
                   Weekly plan
@@ -1695,6 +1806,7 @@ export function WeeklyTrainingPlan() {
                 <X size={15} />
               </button>
             </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-0 sm:p-5 sm:pb-0">
             {storageError && (
               <p className="mb-3 rounded-lg border border-[#f0b47c]/20 bg-[#f0b47c]/[0.06] p-3 text-xs text-[#f0c49d]" role="alert">
                 {storageError}
@@ -1708,6 +1820,7 @@ export function WeeklyTrainingPlan() {
               onCancel={() => setEditing(null)}
               onSave={(session) => savePlannedSession(session, editing.id)}
             />
+            </div>
           </section>
         </div>
       )}

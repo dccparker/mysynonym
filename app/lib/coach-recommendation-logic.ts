@@ -1,6 +1,7 @@
 // Pure decision helpers. Keep this file free of runtime imports so it can be
 // unit-tested directly and used on both the client and the server.
 import type { CoachMessage, CoachPlannerAction } from "./coach-chat-types";
+import { findUnsafeMedicalClaim, structureTexts } from "./workout-catalog.ts";
 
 const ACTIVITY_WORDS =
   "bike|biking|ride|riding|cycle|cycling|run|running|jog|jogging|swim|swimming|row|rowing|walk|walking|hike|hiking|strength|cardio|elliptical|yoga|mobility";
@@ -24,6 +25,19 @@ export function findAmbiguousText(text: string, options: { strictOr?: boolean } 
   return null;
 }
 
+function findUnsafeClaims(action: Extract<CoachPlannerAction, { type: "replace_session" }>) {
+  const texts = [
+    action.title,
+    action.reason,
+    ...action.activities.flatMap((activity) => [
+      activity.instructions,
+      activity.purpose,
+      ...structureTexts(activity),
+    ]),
+  ];
+  return texts.map((text) => findUnsafeMedicalClaim(text));
+}
+
 /** Checks every text field of a replace_session action. */
 export function findAmbiguousWording(action: CoachPlannerAction): string | null {
   if (action.type !== "replace_session") return null;
@@ -34,6 +48,7 @@ export function findAmbiguousWording(action: CoachPlannerAction): string | null 
       findAmbiguousText(activity.instructions),
       findAmbiguousText(activity.purpose),
     ]),
+    ...findUnsafeClaims(action),
   ];
   return issues.find((issue): issue is string => issue !== null) ?? null;
 }

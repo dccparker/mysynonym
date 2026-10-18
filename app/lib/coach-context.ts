@@ -49,7 +49,7 @@ function mondayForDate(dateString: string): string {
 }
 
 function parsePlanner(value: unknown): RecordValue[] {
-  if (!Array.isArray(value) || value.length > 31) {
+  if (!Array.isArray(value) || value.length > 60) {
     throw new CoachRequestError("The current planner data is invalid. Refresh the page and try again.", 400);
   }
   return value.map((rawSession) => {
@@ -82,6 +82,7 @@ function parsePlanner(value: unknown): RecordValue[] {
       return {
         id: text(rawActivity.id, 80),
         activityType,
+        ...(typeof rawActivity.workoutType === "string" ? { workoutType: text(rawActivity.workoutType, 40) } : {}),
         durationMinutes,
         ...(finiteNumber(rawActivity.distance) === undefined
           ? {}

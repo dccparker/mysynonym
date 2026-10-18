@@ -17,11 +17,8 @@ export const profileGoals = [
   "Custom",
 ] as const;
 export const profileActivities = ["Running", "Cycling", "Swimming", "Strength training", "Other"] as const;
-export const weekDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
-
-export function normalizeAvailableTrainingDays(days: readonly string[]): Array<(typeof weekDays)[number]> {
-  return weekDays.filter((day) => days.includes(day));
-}
+import { weekDays, normalizeAvailableTrainingDays } from "./week-days";
+export { weekDays, normalizeAvailableTrainingDays };
 
 export type PreferredUnits = "Metric" | "Imperial";
 export type AthleteSex = "Male" | "Female" | "Prefer not to say" | "";
