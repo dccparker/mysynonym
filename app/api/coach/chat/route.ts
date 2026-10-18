@@ -10,6 +10,11 @@ import {
   releaseConversation,
 } from "../../../lib/coach-conversations";
 import { loadCoachContext } from "../../../lib/coach-context";
+import {
+  findActivePendingMessage,
+  findReplacedMessageIds,
+  describePendingRecommendation,
+} from "../../../lib/coach-recommendation-logic";
 import { CoachModelError, generateCoachReply } from "../../../lib/coach-model";
 
 function jsonResponse(body: object, init?: ResponseInit) {
@@ -106,18 +111,32 @@ export async function POST(request: Request) {
     await addUserMessage(supabase, conversationId, clientMessageId, content);
 
     const transcript = await loadConversationMessages(supabase, conversationId);
-    const promptMessages = transcript.slice(-30).map((message) => ({
-      role: message.role,
-      content: message.plannerProposal
-        ? `${message.content}\n\n[App note: a planner proposal card with Approve, Reject and Explain More buttons was shown with this message (status: ${message.plannerAction?.status ?? "pending"}). The athlete approves with the button, not by chat.]`
-        : message.content,
-    }));
-    const athleteContext = await loadCoachContext(
+    const replaced = findReplacedMessageIds(transcript);
+    const promptMessages = transcript.slice(-30).map((message) => {
+      if (!message.plannerProposal) return { role: message.role, content: message.content };
+      const status = replaced.has(message.id)
+        ? "superseded"
+        : (message.plannerAction?.status ?? "pending");
+      return {
+        role: message.role,
+        content: `${message.content}\n\n[App note: a recommendation card was shown with this message (status: ${status}). The athlete decides with its Approve and Reject buttons, not by chat.${status === "superseded" ? " This card is no longer active." : ""}]`,
+      };
+    });
+    const baseContext = await loadCoachContext(
       supabase,
       authenticated.userId,
       payload.planner ?? [],
       payload.plannerToday,
     );
+    const pendingMessage = findActivePendingMessage(transcript);
+    const athleteContext = `${baseContext}\n\nACTIVE_PENDING_RECOMMENDATION: ${
+      pendingMessage
+        ? describePendingRecommendation(
+            pendingMessage,
+            Array.isArray(payload.planner) ? payload.planner : [],
+          )
+        : "none"
+    }`;
     const reply = await generateCoachReply(promptMessages, athleteContext);
     await addAssistantMessage(
       supabase,

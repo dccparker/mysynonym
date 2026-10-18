@@ -10,7 +10,8 @@ import type {
   SavedCoachMemory,
   SavedCoachPlannerAction,
 } from "../lib/coach-chat-types";
-import { splitProposalDetails } from "../lib/coach-chat-types";
+import { RecommendationCard } from "./recommendation-card";
+import { findReplacedMessageIds } from "../lib/coach-recommendation-logic";
 import {
   applyCoachPlannerAction,
   localDateString,
@@ -69,30 +70,6 @@ function readCurrentPlanner() {
   return planner;
 }
 
-function sessionMinutes(session: PlannedSession) {
-  return session.activities.reduce((total, activity) => total + activity.durationMinutes, 0);
-}
-
-function describeSession(session: PlannedSession) {
-  const intensities = [...new Set(session.activities.map((activity) => activity.intensity))].join("/");
-  return `${session.date} (${session.day}) · ${session.title} · ${sessionMinutes(session)} min · ${intensities}`;
-}
-
-function diffPlans(before: PlannedSession[], after: PlannedSession[]) {
-  const beforeById = new Map(before.map((session) => [session.id, session]));
-  const afterById = new Map(after.map((session) => [session.id, session]));
-  return {
-    removed: before.filter((session) => !afterById.has(session.id)),
-    added: after.filter((session) => !beforeById.has(session.id)),
-    changed: after.flatMap((session) => {
-      const previous = beforeById.get(session.id);
-      return previous && JSON.stringify(previous) !== JSON.stringify(session)
-        ? [{ before: previous, after: session }]
-        : [];
-    }),
-  };
-}
-
 async function loadHistorySessions(): Promise<HistorySession[]> {
   const entries = await loadWorkoutHistory();
   const grouped = new Map<string, HistorySession>();
@@ -121,122 +98,6 @@ async function loadHistorySessions(): Promise<HistorySession[]> {
     grouped.set(key, session);
   });
   return [...grouped.values()];
-}
-
-function PlannerProposalCard({
-  message,
-  action,
-  error,
-  busy,
-  onApprove,
-  onDismiss,
-}: {
-  message: CoachMessage;
-  action: SavedCoachPlannerAction | undefined;
-  error: string | undefined;
-  busy: boolean;
-  onApprove: () => void;
-  onDismiss: () => void;
-}) {
-  const [showMore, setShowMore] = useState(false);
-  const proposal = message.plannerProposal;
-  if (!proposal) return null;
-  const details = splitProposalDetails(proposal);
-  const diff = action ? diffPlans(action.beforePlan, action.afterPlan) : null;
-  const statusLabel: Record<string, string> = {
-    approved: "Approved · applying",
-    applied: "Applied to your planner",
-    stale: "Out of date · your planner changed",
-    rejected: "Rejected · planner unchanged",
-  };
-  const sections = [
-    ["Evidence used", details.evidence],
-    ["Assumptions", details.assumptions],
-    ["Trade-offs", details.tradeOffs],
-    ["Expected downstream effects", details.expectedEffects],
-    ["Uncertainty", details.uncertainty],
-    ["Main alternative considered", details.alternatives],
-  ] as const;
-  const hasMore = sections.some(([, items]) => items.length > 0);
-  return (
-    <div className="mt-2 rounded-xl border border-[#b8f36b]/25 bg-[#0b100e] p-3 text-xs text-[#c2cdc5]">
-      <p className="font-semibold text-[#d6ded8]">Why</p>
-      <ul className="mt-1 list-disc space-y-0.5 pl-4">
-        {details.why.map((line, index) => <li key={index} className="break-words">{line}</li>)}
-      </ul>
-      {diff && (
-        <div className="mt-3 space-y-1 rounded-lg border border-white/[0.08] p-2">
-          <p className="font-semibold text-[#a6b1a9]">Before → after</p>
-          {diff.changed.map(({ before, after }) => (
-            <p key={after.id} className="break-words">
-              <span className="text-red-200">− {describeSession(before)}</span>
-              <br />
-              <span className="text-[#b8f36b]">+ {describeSession(after)}</span>
-            </p>
-          ))}
-          {diff.removed.map((session) => (
-            <p key={session.id} className="break-words text-red-200">− {describeSession(session)}</p>
-          ))}
-          {diff.added.map((session) => (
-            <p key={session.id} className="break-words text-[#b8f36b]">+ {describeSession(session)}</p>
-          ))}
-          {!diff.changed.length && !diff.removed.length && !diff.added.length && (
-            <p>No planner sessions would change.</p>
-          )}
-          <p className="pt-1 text-[10px] text-[#77837a]">
-            Completed sessions and your workout history are never changed.
-          </p>
-        </div>
-      )}
-      {showMore && sections.map(([label, items]) =>
-        items.length ? (
-          <div key={label} className="mt-2">
-            <p className="font-semibold text-[#a6b1a9]">{label}</p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-4">
-              {items.map((item, index) => <li key={index} className="break-words">{item}</li>)}
-            </ul>
-          </div>
-        ) : null,
-      )}
-      {error && <p role="alert" className="mt-2 text-red-200">{error}</p>}
-      {!action && !error && <p className="mt-2 text-[#8c9990]">Preparing preview…</p>}
-      {action && statusLabel[action.status] && (
-        <p className="mt-2 font-semibold text-[#a6b1a9]">{statusLabel[action.status]}</p>
-      )}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {action?.status === "pending" && (
-          <>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onApprove}
-              className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#182014] disabled:opacity-50"
-            >
-              {busy ? "Working…" : "Approve"}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onDismiss}
-              className="rounded-lg border border-white/[0.12] px-3 py-2 text-xs font-semibold text-[#d6ded8] disabled:opacity-50"
-            >
-              Reject
-            </button>
-          </>
-        )}
-        {hasMore && (
-          <button
-            type="button"
-            aria-expanded={showMore}
-            onClick={() => setShowMore((current) => !current)}
-            className="rounded-lg px-3 py-2 text-xs font-semibold text-[#b8f36b] hover:underline"
-          >
-            {showMore ? "Show less" : "Explain More"}
-          </button>
-        )}
-      </div>
-    </div>
-  );
 }
 
 async function requestCoach<T>(
@@ -286,6 +147,7 @@ export function CoachChat() {
   const { profile } = useAthleteProfile();
   const [plannerActions, setPlannerActions] = useState<Record<string, SavedCoachPlannerAction>>({});
   const [plannerErrors, setPlannerErrors] = useState<Record<string, string>>({});
+  const [plannerConfirmations, setPlannerConfirmations] = useState<Record<string, string>>({});
   const [plannerBusyId, setPlannerBusyId] = useState("");
   const previewRequests = useRef(new Set<string>());
   const [error, setError] = useState("");
@@ -411,8 +273,10 @@ export function CoachChat() {
 
   useEffect(() => {
     if (!profile) return;
+    const replaced = findReplacedMessageIds(messages);
     for (const message of messages) {
       if (
+        replaced.has(message.id) ||
         message.role !== "assistant" ||
         !message.plannerProposal ||
         message.plannerAction ||
@@ -526,7 +390,7 @@ export function CoachChat() {
     setPlannerBusyId(messageId);
     setError("");
     try {
-      const approval = await requestCoach<{ afterPlan: PlannedSession[] }>(
+      const approval = await requestCoach<{ afterPlan: PlannedSession[]; message?: string }>(
         accessToken,
         "/api/coach/planner-actions",
         {
@@ -552,6 +416,10 @@ export function CoachChat() {
         ...current,
         [messageId]: { ...action, status: "applied" },
       }));
+      setPlannerConfirmations((current) => ({
+        ...current,
+        [messageId]: approval.message ?? "Recommendation approved. Your training plan has been updated.",
+      }));
     } catch (approveError) {
       if (activeToken.current !== accessToken) return;
       const text = approveError instanceof Error ? approveError.message : "The planner change could not be applied.";
@@ -572,14 +440,22 @@ export function CoachChat() {
     setPlannerBusyId(messageId);
     setError("");
     try {
-      await requestCoach<{ status: string }>(accessToken, "/api/coach/planner-actions", {
-        method: "POST",
-        body: JSON.stringify({ operation: "reject", actionId: action.id }),
-      });
+      const rejection = await requestCoach<{ status: string; message?: string }>(
+        accessToken,
+        "/api/coach/planner-actions",
+        {
+          method: "POST",
+          body: JSON.stringify({ operation: "reject", actionId: action.id }),
+        },
+      );
       if (activeToken.current !== accessToken) return;
       setPlannerActions((current) => ({
         ...current,
         [messageId]: { ...action, status: "rejected" },
+      }));
+      setPlannerConfirmations((current) => ({
+        ...current,
+        [messageId]: rejection.message ?? "No changes were made to your training plan.",
       }));
     } catch (dismissError) {
       if (activeToken.current !== accessToken) return;
@@ -813,8 +689,10 @@ export function CoachChat() {
                           {message.content}
                         </p>
                         {message.role === "assistant" && message.plannerProposal && (
-                          <PlannerProposalCard
+                          <RecommendationCard
                             message={message}
+                            replaced={findReplacedMessageIds(messages).has(message.id)}
+                            confirmation={plannerConfirmations[message.id]}
                             action={plannerActions[message.id] ?? message.plannerAction ?? undefined}
                             error={plannerErrors[message.id]}
                             busy={plannerBusyId === message.id}
@@ -822,7 +700,7 @@ export function CoachChat() {
                               const action = plannerActions[message.id] ?? message.plannerAction;
                               if (action) void approvePlannerAction(message.id, action);
                             }}
-                            onDismiss={() => {
+                            onReject={() => {
                               const action = plannerActions[message.id] ?? message.plannerAction;
                               if (action) void dismissPlannerAction(message.id, action);
                             }}

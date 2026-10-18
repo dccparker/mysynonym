@@ -25,6 +25,8 @@ import {
   type AthleteProfile,
 } from "./lib/athlete-profile";
 import { TodaysDecision } from "./components/todays-decision";
+import { DailyCoachingPlan } from "./components/daily-coaching-plan";
+import { greetingFor } from "./lib/daily-briefing";
 import { DailyRecoveryCheckIn } from "./components/daily-recovery-check-in";
 import {
   localDateString,
@@ -371,7 +373,7 @@ export default function Home() {
               <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#839087]">Athlete dashboard</p>
               <h1 className="mt-2 text-[25px] font-semibold tracking-[-0.04em] text-[#f1f4f0] sm:text-[29px]">
                 {profile?.preferredName
-                  ? `Good morning, ${profile.preferredName}`
+                  ? greetingFor(new Date().getHours(), profile.preferredName)
                   : "Your dashboard"}
                 <span className="text-[#b8f36b]">.</span>
               </h1>
@@ -416,6 +418,8 @@ export default function Home() {
               </button>
             </div>
           </header>
+
+          <div className="mb-5"><DailyCoachingPlan /></div>
 
           <TodaysDecision />
 

@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test app/lib/*.test.mts",
+    "db:check": "node --experimental-strip-types scripts/check-planner-storage.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",

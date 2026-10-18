@@ -3,6 +3,13 @@ import type {
   PlannedIntensity,
   PlannedSession,
 } from "./training-plan";
+import {
+  isRecommendationConfidence,
+  isRecommendationType,
+  type RecommendationConfidence,
+  type RecommendationImpact,
+  type RecommendationType,
+} from "./coach-recommendation-types";
 
 export type CoachConversation = {
   id: string;
@@ -71,7 +78,8 @@ export type CoachPlannerActionStatus =
   | "approved"
   | "applied"
   | "stale"
-  | "rejected";
+  | "rejected"
+  | "superseded";
 
 export type SavedCoachPlannerAction = CoachPlannerProposal & {
   id: string;
@@ -90,7 +98,15 @@ export const PROPOSAL_DETAIL_PREFIXES = {
   evidence: "Evidence: ",
   uncertainty: "Uncertainty: ",
   alternative: "Alternative considered: ",
+  type: "Recommendation type: ",
+  confidence: "Confidence: ",
+  impactWeeklyVolume: "Impact on weekly volume: ",
+  impactRecovery: "Impact on recovery: ",
+  impactFitness: "Impact on fitness progression: ",
+  impactGoal: "Impact on goal progression: ",
 } as const;
+
+export const MAX_PROPOSAL_LINES = 16;
 
 export function splitProposalDetails(proposal: CoachPlannerProposal) {
   const details = {
@@ -103,6 +119,14 @@ export function splitProposalDetails(proposal: CoachPlannerProposal) {
     assumptions: [] as string[],
     uncertainty: [] as string[],
     alternatives: [] as string[],
+    recommendationType: null as RecommendationType | null,
+    confidence: null as RecommendationConfidence | null,
+    impact: {
+      weeklyVolume: "",
+      recovery: "",
+      fitnessProgression: "",
+      goalProgression: "",
+    } as RecommendationImpact,
     tradeOffs: proposal.tradeOffs,
     expectedEffects: proposal.expectedEffects,
   };
@@ -113,6 +137,20 @@ export function splitProposalDetails(proposal: CoachPlannerProposal) {
       details.uncertainty.push(line.slice(PROPOSAL_DETAIL_PREFIXES.uncertainty.length));
     } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.alternative)) {
       details.alternatives.push(line.slice(PROPOSAL_DETAIL_PREFIXES.alternative.length));
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.type)) {
+      const value = line.slice(PROPOSAL_DETAIL_PREFIXES.type.length);
+      if (isRecommendationType(value)) details.recommendationType = value;
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.confidence)) {
+      const value = line.slice(PROPOSAL_DETAIL_PREFIXES.confidence.length);
+      if (isRecommendationConfidence(value)) details.confidence = value;
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.impactWeeklyVolume)) {
+      details.impact.weeklyVolume = line.slice(PROPOSAL_DETAIL_PREFIXES.impactWeeklyVolume.length);
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.impactRecovery)) {
+      details.impact.recovery = line.slice(PROPOSAL_DETAIL_PREFIXES.impactRecovery.length);
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.impactFitness)) {
+      details.impact.fitnessProgression = line.slice(PROPOSAL_DETAIL_PREFIXES.impactFitness.length);
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.impactGoal)) {
+      details.impact.goalProgression = line.slice(PROPOSAL_DETAIL_PREFIXES.impactGoal.length);
     } else {
       details.assumptions.push(line);
     }

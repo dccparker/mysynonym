@@ -2,6 +2,29 @@ import {
   authenticateCoachRequest,
   CoachRequestError,
 } from "../../../lib/coach-conversations";
+import { MAX_PROPOSAL_LINES } from "../../../lib/coach-chat-types";
+import {
+  findAmbiguousWording,
+  findAmbiguousSessionTitle,
+  targetWorkoutKey,
+  canApproveStatus,
+} from "../../../lib/coach-recommendation-logic";
+import {
+  approvalMessage,
+  assertRecommendationApprovable,
+  RecommendationSupersededError,
+  restoreSuperseded,
+  supersedePendingForTarget,
+  type SupersededRecords,
+  approveRecommendation,
+  buildTrainingPlanChanges,
+  createRecommendation,
+  expireRecommendation,
+  recordRecommendationApplied,
+  rejectRecommendation,
+  REJECTION_MESSAGE,
+} from "../../../lib/coach-recommendations";
+import { isMissingStorageError } from "../../../lib/planner-storage-check";
 import type {
   CoachPlannerAction,
   CoachPlannerActionStatus,
@@ -55,6 +78,65 @@ function errorResponse(error: unknown) {
     { error: "The planner proposal could not be processed. Please try again." },
     { status: 500 },
   );
+}
+
+type SupabaseFailure = { code?: string; message?: string; details?: string; hint?: string };
+
+// Logs the real Supabase error and maps it to an actionable message.
+function describeDatabaseError(step: string, error: SupabaseFailure | null, fallback: string) {
+  console.error(`Coach planner step "${step}" failed:`, {
+    code: error?.code,
+    message: error?.message,
+    details: error?.details,
+    hint: error?.hint,
+  });
+  switch (error?.code) {
+    case "42P01":
+    case "PGRST205":
+      return "The planner storage is not set up yet. Apply the latest Supabase migrations and try again.";
+    case "42703":
+    case "PGRST204":
+      return "The planner storage schema is out of date. Apply the latest Supabase migrations and try again.";
+    case "42501":
+      return "You do not have permission to save this planner preview. Sign in again and retry; if it persists, the proposal no longer matches the saved Coach message.";
+    case "23502":
+      return "The planner preview is missing required information. Ask the Coach for a fresh proposal.";
+    case "23503":
+      return "The Coach message for this preview could not be found. Ask the Coach for a fresh proposal.";
+    case "23505":
+      return "This planner preview was already saved. Refresh the conversation.";
+    case "22P02":
+    case "23514":
+      return "The planner preview contains invalid data. Ask the Coach for a fresh proposal.";
+    default:
+      return fallback;
+  }
+}
+
+// Recommendation history is secondary to the planner action. If its table has
+// not been migrated yet, log loudly and continue so previews, approvals and
+// rejections still work; any other failure is surfaced to the athlete.
+async function recommendationStep(
+  step: string,
+  run: () => Promise<void>,
+  fallback: string,
+) {
+  try {
+    await run();
+  } catch (error) {
+    if (error instanceof RecommendationSupersededError) {
+      throw new CoachRequestError(error.message, 409);
+    }
+    const failure = error as SupabaseFailure;
+    if (isMissingStorageError(failure)) {
+      console.error(
+        `Coach recommendation history unavailable (${step}); apply migration 20261019000000_create_coach_recommendations.sql.`,
+        { code: failure.code, message: failure.message },
+      );
+      return;
+    }
+    throw new CoachRequestError(describeDatabaseError(step, failure, fallback), 500);
+  }
 }
 
 function stableValue(value: unknown): unknown {
@@ -150,7 +232,7 @@ function parseProposal(value: unknown): CoachPlannerProposal {
     !Array.isArray(value.expectedEffects) ||
     [value.assumptions, value.tradeOffs, value.expectedEffects].some(
       (items) =>
-        items.length > 12 ||
+        items.length > MAX_PROPOSAL_LINES ||
         items.some(
           (item) =>
             typeof item !== "string" ||
@@ -241,6 +323,13 @@ function parseProposal(value: unknown): CoachPlannerProposal {
     parsedAction = { type: action.type, weekStarting: action.weekStarting };
   } else {
     throw new CoachRequestError("The proposed planner action is not supported.", 400);
+  }
+  const ambiguity = findAmbiguousWording(parsedAction);
+  if (ambiguity) {
+    throw new CoachRequestError(
+      `The Coach proposed an unclear workout (${ambiguity}). Ask the Coach for a specific workout.`,
+      400,
+    );
   }
   return {
     action: parsedAction,
@@ -448,7 +537,12 @@ async function loadAction(
     .eq("id", actionId)
     .eq("user_id", userId)
     .maybeSingle();
-  if (error) throw new CoachRequestError("The planner proposal could not be loaded.", 500);
+  if (error) {
+    throw new CoachRequestError(
+      describeDatabaseError("load coach_planner_actions", error, "The planner proposal could not be loaded."),
+      500,
+    );
+  }
   if (!data) throw new CoachRequestError("This planner proposal was not found.", 404);
   return data as PlannerActionRow;
 }
@@ -482,14 +576,20 @@ export async function POST(request: Request) {
       }
       const { data: message, error: messageError } = await supabase
         .from("coach_messages")
-        .select("role,conversation_id,planner_proposal")
+        .select("role,content,conversation_id,created_at,planner_proposal")
         .eq("id", payload.sourceMessageId)
         .maybeSingle();
-      if (messageError) throw new CoachRequestError("The Coach proposal could not be loaded.", 500);
+      if (messageError) {
+        throw new CoachRequestError(
+          describeDatabaseError("load coach_messages", messageError, "The Coach proposal could not be loaded."),
+          500,
+        );
+      }
       if (!message || message.role !== "assistant") {
         throw new CoachRequestError("This Coach message cannot propose a planner action.", 400);
       }
       const proposal = parseProposal(message.planner_proposal);
+      const storedProposal = message.planner_proposal as CoachPlannerProposal;
       const beforePlan = parsePlan(payload.beforePlan);
       const afterPlan = parsePlan(payload.afterPlan);
       assertPlanMatchesAction(
@@ -511,33 +611,107 @@ export async function POST(request: Request) {
         .select("id,user_id,conversation_id,source_message_id,action,rationale,assumptions,trade_offs,expected_effects,before_snapshot,after_snapshot,status,created_at,approved_at,applied_at")
         .eq("source_message_id", payload.sourceMessageId)
         .maybeSingle();
-      if (existingError) throw new CoachRequestError("Planner proposal state could not be loaded.", 500);
+      if (existingError) {
+        throw new CoachRequestError(
+          describeDatabaseError("load existing planner action", existingError, "Planner proposal state could not be loaded."),
+          500,
+        );
+      }
       if (existing) {
         const row = existing as PlannerActionRow;
         if (row.status === "pending" && stableJson(row.before_snapshot) === stableJson(beforePlan)) {
+          await recommendationStep("save coach_recommendations", () => createRecommendation(supabase, {
+              userId,
+              plannerActionId: row.id,
+              proposal,
+              coachMessage: typeof message.content === "string" ? message.content : "",
+              beforePlan,
+              afterPlan: row.after_snapshot,
+          }), "The recommendation could not be saved.");
           return jsonResponse({ action: toAction(row) });
         }
         throw new CoachRequestError("This Coach proposal has already been reviewed or its plan has changed.", 409);
       }
-      const { data, error } = await supabase
-        .from("coach_planner_actions")
-        .insert({
-          user_id: userId,
-          conversation_id: message.conversation_id,
-          source_message_id: payload.sourceMessageId,
-          action: proposal.action,
-          rationale: proposal.rationale,
-          assumptions: proposal.assumptions,
-          trade_offs: proposal.tradeOffs,
-          expected_effects: proposal.expectedEffects,
-          before_snapshot: beforePlan,
-          after_snapshot: afterPlan,
-          status: "pending",
-        })
-        .select("id,user_id,conversation_id,source_message_id,action,rationale,assumptions,trade_offs,expected_effects,before_snapshot,after_snapshot,status,created_at,approved_at,applied_at")
-        .single();
-      if (error || !data) throw new CoachRequestError("The planner preview could not be saved.", 500);
-      return jsonResponse({ action: toAction(data as PlannerActionRow) });
+      // A newer proposal for the same workout replaces this one.
+      const { data: newer, error: newerError } = await supabase
+        .from("coach_messages")
+        .select("id,planner_proposal")
+        .eq("conversation_id", message.conversation_id)
+        .eq("role", "assistant")
+        .gt("created_at", message.created_at)
+        .not("planner_proposal", "is", null);
+      if (newerError) {
+        throw new CoachRequestError(
+          describeDatabaseError("load newer proposals", newerError, "Newer Coach proposals could not be checked."),
+          500,
+        );
+      }
+      const thisTarget = targetWorkoutKey(proposal.action);
+      const replacedByNewer = (newer ?? []).some((row) => {
+        const candidate = (row as { planner_proposal: { action?: CoachPlannerAction } }).planner_proposal;
+        return candidate?.action ? targetWorkoutKey(candidate.action) === thisTarget : false;
+      });
+      if (replacedByNewer) {
+        throw new CoachRequestError(
+          "This recommendation was replaced by a newer one and can no longer be approved.",
+          409,
+        );
+      }
+
+      let superseded: SupersededRecords = { plannerActionIds: [], recommendationIds: [] };
+      try {
+        superseded = await supersedePendingForTarget(supabase, userId, proposal.action);
+      } catch (supersedeError) {
+        throw new CoachRequestError(
+          describeDatabaseError(
+            "supersede earlier recommendation",
+            supersedeError as SupabaseFailure,
+            "The earlier recommendation could not be replaced. Apply the latest Supabase migrations and try again.",
+          ),
+          500,
+        );
+      }
+      try {
+        const { data, error } = await supabase
+          .from("coach_planner_actions")
+          .insert({
+            user_id: userId,
+            conversation_id: message.conversation_id,
+            source_message_id: payload.sourceMessageId,
+            // Must equal coach_messages.planner_proposal exactly for the RLS check.
+            action: storedProposal.action,
+            rationale: storedProposal.rationale,
+            assumptions: storedProposal.assumptions,
+            trade_offs: storedProposal.tradeOffs,
+            expected_effects: storedProposal.expectedEffects,
+            before_snapshot: beforePlan,
+            after_snapshot: afterPlan,
+            status: "pending",
+          })
+          .select("id,user_id,conversation_id,source_message_id,action,rationale,assumptions,trade_offs,expected_effects,before_snapshot,after_snapshot,status,created_at,approved_at,applied_at")
+          .single();
+        if (error || !data) {
+          throw new CoachRequestError(
+            describeDatabaseError("insert coach_planner_actions", error, "The planner preview could not be saved."),
+            500,
+          );
+        }
+        await recommendationStep("save coach_recommendations", () => createRecommendation(supabase, {
+            superseded,
+            userId,
+            plannerActionId: (data as PlannerActionRow).id,
+            proposal,
+            coachMessage: typeof message.content === "string" ? message.content : "",
+            beforePlan,
+            afterPlan,
+          }), "The recommendation could not be saved.");
+        return jsonResponse({ action: toAction(data as PlannerActionRow) });
+      } catch (saveError) {
+        await restoreSuperseded(supabase, userId, superseded).catch((restoreError) =>
+          console.error("Superseded recommendations could not be restored:", restoreError),
+        );
+        throw saveError;
+      }
     }
 
     if (
@@ -548,6 +722,10 @@ export async function POST(request: Request) {
     }
     const row = await loadAction(supabase, userId, payload.actionId);
     if (payload.operation === "approve") {
+      if (row.status === "superseded") {
+        const verdict = canApproveStatus(row.status);
+        throw new CoachRequestError(verdict.ok ? "" : verdict.reason, 409);
+      }
       const currentPlan = parsePlan(payload.currentPlan);
       if (stableJson(currentPlan) !== stableJson(row.before_snapshot)) {
         if (row.status === "pending") {
@@ -557,6 +735,9 @@ export async function POST(request: Request) {
             .eq("id", row.id)
             .eq("user_id", userId)
             .eq("status", "pending");
+          await expireRecommendation(supabase, userId, row.id).catch((expireError) =>
+            console.error("Coach recommendation could not be expired:", expireError),
+          );
         }
         throw new CoachRequestError("The planner changed since this preview. Ask the Coach to prepare a fresh proposal.", 409);
       }
@@ -566,6 +747,24 @@ export async function POST(request: Request) {
       if (row.status === "stale" || row.status === "rejected") {
         throw new CoachRequestError("This planner proposal is no longer available.", 409);
       }
+      const ambiguity =
+        findAmbiguousWording(row.action) ??
+        (row.action.type === "replace_session"
+          ? findAmbiguousSessionTitle(
+              row.after_snapshot.find((session) => session.id === (row.action as { sessionId: string }).sessionId)?.title ?? "",
+            )
+          : null);
+      if (ambiguity) {
+        throw new CoachRequestError(
+          `This recommendation is not specific enough to apply (${ambiguity}). Ask the Coach for a specific workout.`,
+          409,
+        );
+      }
+      await recommendationStep(
+        "check coach_recommendations",
+        () => assertRecommendationApprovable(supabase, userId, row.id),
+        "The recommendation state could not be checked. Please try again.",
+      );
       if (row.status === "pending") {
         const { data, error } = await supabase
           .from("coach_planner_actions")
@@ -575,10 +774,24 @@ export async function POST(request: Request) {
           .eq("status", "pending")
           .select("id")
           .maybeSingle();
-        if (error) throw new CoachRequestError("The planner approval could not be recorded.", 500);
+        if (error) throw new CoachRequestError(describeDatabaseError("approve update", error, "The planner approval could not be recorded."), 500);
         if (!data) throw new CoachRequestError("This planner proposal has already been processed.", 409);
       }
-      return jsonResponse({ afterPlan: row.after_snapshot, status: "approved" });
+      const planChanges = buildTrainingPlanChanges(
+        row.action,
+        row.before_snapshot,
+        row.after_snapshot,
+      );
+      await recommendationStep(
+        "approve coach_recommendations",
+        () => approveRecommendation(supabase, userId, row.id, planChanges),
+        "The recommendation approval could not be saved. Please try again.",
+      );
+      return jsonResponse({
+        afterPlan: row.after_snapshot,
+        status: "approved",
+        message: approvalMessage(planChanges),
+      });
     }
     if (payload.operation === "applied") {
       const currentPlan = parsePlan(payload.currentPlan);
@@ -597,14 +810,37 @@ export async function POST(request: Request) {
         .eq("status", "approved")
         .select("id")
         .maybeSingle();
-      if (error) throw new CoachRequestError("The planner update could not be recorded.", 500);
+      if (error) throw new CoachRequestError(describeDatabaseError("applied update", error, "The planner update could not be recorded."), 500);
       if (!data) throw new CoachRequestError("This planner proposal has already been processed.", 409);
+      await recordRecommendationApplied(
+        supabase,
+        userId,
+        row.id,
+        buildTrainingPlanChanges(
+          row.action,
+          row.before_snapshot,
+          row.after_snapshot,
+          new Date().toISOString(),
+        ),
+      ).catch((appliedError) =>
+        console.error("Coach recommendation applied state could not be saved:", appliedError),
+      );
       return jsonResponse({ status: "applied" });
     }
     if (payload.operation === "reject") {
       if (row.status !== "pending") {
-        throw new CoachRequestError("Only pending planner proposals can be rejected.", 409);
+        throw new CoachRequestError(
+          row.status === "superseded"
+            ? "This recommendation was replaced by a newer one."
+            : "Only pending planner proposals can be rejected.",
+          409,
+        );
       }
+      await recommendationStep(
+        "reject coach_recommendations",
+        () => rejectRecommendation(supabase, userId, row.id),
+        "The rejection could not be fully saved. Please try again.",
+      );
       const { data, error } = await supabase
         .from("coach_planner_actions")
         .update({ status: "rejected" })
@@ -613,9 +849,9 @@ export async function POST(request: Request) {
         .eq("status", "pending")
         .select("id")
         .maybeSingle();
-      if (error) throw new CoachRequestError("The planner proposal could not be dismissed.", 500);
+      if (error) throw new CoachRequestError(describeDatabaseError("reject update", error, "The planner proposal could not be dismissed."), 500);
       if (!data) throw new CoachRequestError("This planner proposal has already been processed.", 409);
-      return jsonResponse({ status: "rejected" });
+      return jsonResponse({ status: "rejected", message: REJECTION_MESSAGE });
     }
     throw new CoachRequestError("The planner action operation is not supported.", 400);
   } catch (error) {

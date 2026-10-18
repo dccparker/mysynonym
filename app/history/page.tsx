@@ -12,6 +12,7 @@ import {
   WORKOUTS_UPDATED_EVENT,
 } from "../lib/workout-storage";
 import { supabase } from "../lib/supabase";
+import { RecommendationHistory } from "../components/recommendation-history";
 
 type WorkoutHistoryEntry = {
   id: string;
@@ -201,6 +202,7 @@ export default function HistoryPage() {
       )}
 
       <div className="grid gap-4">
+        <RecommendationHistory />
         <section
           aria-labelledby="workout-history-heading"
           className="rounded-lg border border-white/[0.07] bg-[#111714] p-4 sm:p-5"

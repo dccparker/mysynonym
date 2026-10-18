@@ -4,6 +4,13 @@ import type {
   CoachPlannerProposal,
 } from "./coach-chat-types";
 import { PROPOSAL_DETAIL_PREFIXES } from "./coach-chat-types";
+import { classifyCoachReply, findAmbiguousWording } from "./coach-recommendation-logic";
+import {
+  isRecommendationConfidence,
+  isRecommendationType,
+  RECOMMENDATION_TYPES,
+  type RecommendationType,
+} from "./coach-recommendation-types";
 import type { PlannedIntensity, PlannedActivity } from "./training-plan";
 
 type ModelMessage = {
@@ -27,6 +34,7 @@ export type CoachModelReply = {
   memoryObservation: CoachMemoryObservation | null;
   plannerProposal: CoachPlannerProposal | null;
   proposalAttempted?: boolean;
+  rejectionReason?: string;
 };
 
 const activityTypes = ["Run", "Ride", "Swim", "Strength", "Other"] as const;
@@ -107,6 +115,12 @@ function parsePlannerAction(value: unknown): CoachPlannerAction | null {
   return null;
 }
 
+function defaultRecommendationType(action: CoachPlannerAction): RecommendationType {
+  if (action.type === "move_session") return "schedule_conflict";
+  if (action.type === "replace_session") return "missed_workout";
+  return "training_load_adjustment";
+}
+
 function parseCoachModelReply(value: unknown): CoachModelReply {
   if (typeof value !== "string") {
     throw new Error("The AI provider returned an invalid response.");
@@ -151,6 +165,7 @@ function parseCoachModelReply(value: unknown): CoachModelReply {
   }
   let plannerProposal: CoachModelReply["plannerProposal"] = null;
   let proposalAttempted = false;
+  let rejectionReason: string | undefined;
   if (
     typeof response.plannerProposal === "object" &&
     response.plannerProposal !== null &&
@@ -175,12 +190,35 @@ function parseCoachModelReply(value: unknown): CoachModelReply {
       typeof proposal.alternativeConsidered === "string"
         ? proposal.alternativeConsidered.trim().slice(0, 290)
         : "";
-    if (action && why.length) {
+    const impact = (typeof proposal.impact === "object" &&
+      proposal.impact !== null &&
+      !Array.isArray(proposal.impact)
+      ? proposal.impact
+      : {}) as Record<string, unknown>;
+    const impactLine = (prefix: string, value: unknown) =>
+      typeof value === "string" && value.trim()
+        ? [prefix + value.trim().slice(0, 140)]
+        : [];
+    const ambiguity = action ? findAmbiguousWording(action) : null;
+    if (ambiguity) rejectionReason = ambiguity;
+    if (action && why.length && !ambiguity) {
+      const recommendationType = isRecommendationType(proposal.recommendationType)
+        ? proposal.recommendationType
+        : defaultRecommendationType(action);
+      const confidence = isRecommendationConfidence(proposal.confidence)
+        ? proposal.confidence
+        : "medium";
       plannerProposal = {
         action,
         rationale: why.join("\n"),
         assumptions: [
-          ...lines(proposal.evidence, 4).map((line) => PROPOSAL_DETAIL_PREFIXES.evidence + line),
+          PROPOSAL_DETAIL_PREFIXES.type + recommendationType,
+          PROPOSAL_DETAIL_PREFIXES.confidence + confidence,
+          ...impactLine(PROPOSAL_DETAIL_PREFIXES.impactWeeklyVolume, impact.weeklyVolume),
+          ...impactLine(PROPOSAL_DETAIL_PREFIXES.impactRecovery, impact.recovery),
+          ...impactLine(PROPOSAL_DETAIL_PREFIXES.impactFitness, impact.fitnessProgression),
+          ...impactLine(PROPOSAL_DETAIL_PREFIXES.impactGoal, impact.goalProgression),
+          ...lines(proposal.evidence, 3).map((line) => PROPOSAL_DETAIL_PREFIXES.evidence + line),
           ...lines(proposal.assumptions, 4),
           ...lines(proposal.uncertainty, 2).map((line) => PROPOSAL_DETAIL_PREFIXES.uncertainty + line),
           ...(alternative ? [PROPOSAL_DETAIL_PREFIXES.alternative + alternative] : []),
@@ -190,7 +228,7 @@ function parseCoachModelReply(value: unknown): CoachModelReply {
       };
     }
   }
-  return { content, memoryObservation, plannerProposal, proposalAttempted };
+  return { content, memoryObservation, plannerProposal, proposalAttempted, rejectionReason };
 }
 
 export class CoachModelError extends Error {
@@ -206,22 +244,59 @@ export class CoachModelError extends Error {
 const permissionSeeking =
   /(would you like me to|do you want me to|should i|shall i|want me to)\s+(propose|prepare|create|draft|put together|make|set up|build|suggest|adjust|move|replace|update)|does (that|this) sound (good|right|ok)|sound good\?|i'?ll (prepare|draft|put together|propose|create) (a|the|an) (plan|proposal|change)|let me know (if|and i)|which (option|day) (would you|do you) prefer/i;
 
+const safetySignal =
+  /\b(pain|painful|hurts?|hurting|injur\w*|sprain\w*|strain\w*|swollen|swelling|dizz\w*|faint\w*|chest|fever|sick|ill|illness|flu|covid|vomit\w*|concussion|numb\w*|tingl\w*|short of breath)\b/i;
+
+const noStallCorrection =
+  "Your previous reply asked the athlete a question or for permission instead of making a recommendation. The athlete's profile, plan, history, recovery data, memories and messages are sufficient to decide. Do not ask any question and do not offer a menu. Reply with a one-to-two sentence Recommendation and return a valid plannerProposal now, choosing the most sensible option, stating any unknowns as assumptions and lowering \"confidence\" if unsure. If the athlete gave a vague answer such as \"anything\", choose for them. If they stated a preference (for example running instead of resting), build the proposal around it.";
+
+const needsCardCorrection =
+  "Your previous reply proposed a different workout, activity, duration, intensity, date or location in plain text without a plannerProposal. Any change to the athlete's planned session must be a structured card. Return the same single, specific workout as a valid plannerProposal now (use replace_session when the activity changes), with a one-to-two sentence Recommendation as the reply. If an ACTIVE_PENDING_RECOMMENDATION exists, the new proposal must target the same session and revise it.";
+
+function ambiguityCorrection(reason: string) {
+  return `Your previous plannerProposal was rejected because it was ambiguous: ${reason}. Select ONE specific workout. Do not use "or" or "/" between activities, and avoid vague words such as cardio or anything. Choose using the current plan, recent completed and missed workouts, recovery, profile, equipment, preferences and memories; state any needed assumption and lower "confidence" if the context is incomplete; prefer a conservative specific choice (for example "45-minute moderate indoor bike"). Return a corrected plannerProposal now.`;
+}
+
 export async function generateCoachReply(
   messages: ModelMessage[],
   athleteContext: string,
 ): Promise<CoachModelReply> {
-  const first = await requestCoachReply(messages, athleteContext);
-  if (first.plannerProposal) return first;
-  const droppedProposal = first.proposalAttempted === true;
-  if (!droppedProposal && !permissionSeeking.test(first.content)) return first;
-  const retry = await requestCoachReply(
-    messages,
-    athleteContext,
-    droppedProposal
-      ? "Your previous plannerProposal could not be used. Return the same single preferred recommendation again with a valid plannerProposal that exactly follows the supported action forms, using session and activity IDs and dates from the current planner."
-      : "Your previous reply asked the athlete for permission or a preference instead of owning the recommendation. Do not ask whether to propose, prepare or change anything and do not offer a menu. If the athlete's data is sufficient, reply with a one-to-two sentence Recommendation and return a valid plannerProposal now. Only if a blocking unknown (pain/injury, illness, travel, available time, equipment/location, a major unlogged recovery change, or a personal constraint not in the data) would materially change the recommendation, ask at most one or two focused questions with plannerProposal null.",
-  );
-  return retry.plannerProposal || !permissionSeeking.test(retry.content) ? retry : first;
+  const recentAthleteText = messages
+    .filter((message) => message.role === "user")
+    .slice(-3)
+    .map((message) => message.content)
+    .join("\n");
+  const safetyBlocked = safetySignal.test(recentAthleteText);
+
+  let reply = await requestCoachReply(messages, athleteContext);
+  // Up to two corrective retries: a dropped or ambiguous proposal, a stalling
+  // question, or a workout change described only in text.
+  for (let attempt = 0; attempt < 2 && !reply.plannerProposal; attempt += 1) {
+    const droppedProposal = reply.proposalAttempted === true;
+    const kind = classifyCoachReply({
+      content: reply.content,
+      hasProposal: false,
+      safetyBlocked,
+    });
+    const stalling =
+      permissionSeeking.test(reply.content) || (!safetyBlocked && reply.content.includes("?"));
+    if (!droppedProposal && !stalling && kind !== "needs_card") break;
+    const correction = reply.rejectionReason
+      ? ambiguityCorrection(reply.rejectionReason)
+      : droppedProposal
+        ? "Your previous plannerProposal could not be used. Return the same single preferred recommendation again with a valid plannerProposal that exactly follows the supported action forms, using session and activity IDs and dates from the current planner."
+        : kind === "needs_card"
+          ? needsCardCorrection
+          : safetyBlocked
+            ? "Your previous reply asked the athlete for permission or a preference instead of owning the recommendation. Do not ask whether to propose, prepare or change anything and do not offer a menu. If the athlete's data is sufficient, reply with a one-to-two sentence Recommendation and return a valid plannerProposal now. Only if pain, injury or illness details are genuinely required to make a safe recommendation, ask at most one or two focused safety questions with plannerProposal null."
+            : noStallCorrection;
+    const retry = await requestCoachReply(messages, athleteContext, correction);
+    if (retry.plannerProposal) return retry;
+    // Keep the best text-only reply: never one that seeks permission.
+    if (!permissionSeeking.test(retry.content)) reply = retry;
+    else break;
+  }
+  return reply;
 }
 
 async function requestCoachReply(
@@ -289,21 +364,28 @@ Do not claim certainty from sparse logs, invent progress or recovery trends when
 Response style (default concise): keep replies short. For non-planner questions answer briefly and give the fuller evidence, assumptions, uncertainty and trade-off explanation when the athlete asks for more detail.
 
 Planner authority:
-Planner requests (recommendation-first) override the general "ask before recommending" and "evidence → assumptions → uncertainty → trade-off" reply sequence above. Whenever the athlete raises something that affects the plan (a missed or skipped session, fatigue, travel, schedule or equipment change, a request to move/replace/shorten/regenerate a workout), you own the recommendation:
+Planner requests (recommendation-first) override the general "ask before recommending", "ask the smallest number of focused questions" and "evidence → assumptions → uncertainty → trade-off" guidance above: for anything affecting the plan, recommending is the default and questions are the exception. Whenever the athlete raises something that affects the plan (a missed or skipped session, fatigue, travel, schedule or equipment change, a request to move/replace/shorten/regenerate a workout), you own the recommendation:
 - Decide on exactly ONE preferred change using profile and goal, experience, availability, equipment, limitations, workout and recovery history, the current plan, completed and missed sessions, upcoming load, and saved memories. Return it immediately as plannerProposal in the same reply. Never present a menu of dates or workouts.
 - The reply text is brief and shows only: "Recommendation:" followed by one or two sentences naming the change (for example "Replace Sunday's Easy Run with a modified makeup run."). Do not repeat the Why, the details or the preview in the text; the app shows them in the card, with Approve, Reject and Explain More buttons below your reply.
 - NEVER write permission-seeking or stalling phrases such as "Would you like me to propose a plan?", "Does that sound good?", "Should I prepare the change?", "I'll prepare a plan", "Let me know if...", or ask which option the athlete prefers. Never tell the athlete to reply "yes" or "go ahead"; the card's Approve button is the only approval step. If an earlier message already shows a proposal card, do not ask for confirmation again; if the athlete says "yes" or "sounds good" in chat, remind them in one sentence to press Approve on the card, and do not create a duplicate proposal. If they change their mind or add information, return a new revised proposal.
-- Ask questions only before the proposal, and only if the missing answer could materially change the recommendation and is not in the profile, workouts, recovery, planner, memories or earlier messages. Qualifying unknowns: pain or possible injury, illness, travel, available time, equipment or training-location access, a major unlogged recovery change, or a genuine personal constraint absent from the data. Ask at most one or two focused questions in one message, with plannerProposal null and no recommendation yet. Everything lower-impact becomes a stated assumption.
+- Decision hierarchy. Priority 1: return a plannerProposal. Priority 2: ask a question ONLY when a recommendation cannot be made safely. Having enough information means the profile, goals, availability, recent and missed workouts, recovery check-ins, the current planner and saved memories together support a reasonable choice; when they do, recommend immediately with no preliminary questions.
+- A question is allowed only for a safety-blocking unknown: reported or suspected pain or injury, concerning or systemic illness symptoms, or a medical red flag whose details change whether training is appropriate. Ask at most one or two focused questions with plannerProposal null. Everything else (time available, equipment, preferences, travel details, motivation, how tired they feel) is NOT blocking: choose the most sensible option from the data, state it as an assumption and reflect lower certainty in "confidence". Low confidence alone is never a reason to ask; propose a conservative, easy-to-reverse option instead.
+- Vague, open or deferring replies ("anything", "you choose", "whatever you think", "something other than rest", "not sure") are delegation: decide for the athlete and return a card now. Never re-ask or offer options after such a reply.
+- An athlete's stated preference ("I'd like to run instead", "I only have 30 minutes", "I want something other than rest") is new information: immediately return a revised plannerProposal that honors it (for example a replace_session to a run) and keep the reply to a short "Recommendation:" line. "I have to miss today's workout" gets a card on the first message: move, shorten, replace or absorb the session using the plan and recent load.
+- Do not end a reply with a question or a menu when a recommendation can be made. Do not ask for confirmation, and do not say "let me know"; the card's Approve and Reject buttons are the only decision step.
+- Cards for every change. If your reply proposes a different workout, activity, duration, intensity, date or location than what is planned (including a walk, mobility session, outdoor session or any replacement), you MUST return it as a plannerProposal card. Never describe such a change only in text. Text-only replies are acceptable only when no plan change is needed or the answer is purely informational. Outdoor or indoor location has no field of its own: put it in the replace_session title and instructions (for example "Outdoor recovery walk" or "Indoor bike"). Use replace_session whenever the activity type changes; adjust_activity only changes duration or intensity.
+- One specific workout, never options. Choose exactly one workout. Titles, instructions and purposes must never contain "or" or "/" between activities (such as "Bike or Run" or "Swim or Cycle") and must not use vague wording such as "cardio" or "anything easy". Pick the activity using the current plan, recent completed and missed workouts, upcoming sessions, recovery, profile, equipment, explicit preferences and saved memories. State any needed assumption (for example that an indoor bike is available), lower "confidence" when context is incomplete, and prefer a conservative specific choice. Example: "45-minute moderate indoor bike" with why: "Adds aerobic work with lower impact than running", "Accounts for recently missed training", "Protects the next planned session". If the athlete asks for something harder, choose one specific moderate workout.
+- Pending recommendation continuity. The context ends with ACTIVE_PENDING_RECOMMENDATION: the card the athlete currently sees and has not decided, or "none". Interpret every new athlete message relative to it. If the message changes feasibility or preference (weather, "it just started raining", time, equipment, energy, "something harder", "I'd like to run instead"), return a NEW plannerProposal that targets the same session and replaces it, and open the reply with why, for example: "Since outdoor training is no longer suitable, I've revised the recommendation to a 45-minute moderate indoor bike." The app marks the old card superseded and shows the new card. Never refer to an earlier text-only suggestion as the active plan; the only active plan is the pending card (or the unchanged planner). If the message does not affect the pending recommendation, do not create a new card and, if relevant, remind the athlete in one sentence to use Approve or Reject on the card. Only one actionable recommendation can be pending per workout.
 - Never change, save, or claim to have changed a plan. The athlete must click Approve on the card before anything is applied.
 - Choose one concrete change using only session IDs and dates from the current planner. Never target completed or past sessions or workout history. To regenerate the rest of the week, use the Monday of the current planner week.
-- plannerProposal fields: "why" (1 to 3 short bullets, each under 120 characters, the key reasons only), "evidence" (facts used from the data), "assumptions", "uncertainty" (meaningful uncertainty, empty if none), "tradeOffs", "expectedEffects" (downstream effects), "alternativeConsidered" (the main alternative and why you rejected it, one sentence), and "action". All but "why" and "action" are shown only behind Explain More, so keep each to one short sentence and at most four items.
+- plannerProposal fields: "recommendationType" (exactly one of: ${RECOMMENDATION_TYPES.join(", ")}), "confidence" ("high", "medium" or "low"; use "low" when key facts are assumed), "impact" (an object with short phrases, each under 60 characters, for "weeklyVolume", "recovery", "fitnessProgression" and "goalProgression", for example "Maintained", "Low", "Slightly delayed", "Unchanged"), "why" (exactly 3 short coaching reasons, each under 120 characters, the key reasons only), "evidence" (facts used from the data), "assumptions", "uncertainty" (meaningful uncertainty, empty if none), "tradeOffs", "expectedEffects" (downstream effects), "alternativeConsidered" (the main alternative and why you rejected it, one sentence), and "action". Everything except "recommendationType", "confidence", "impact", "why" and "action" is shown only behind Explain More, so keep each to one short sentence and at most four items.
 - Return plannerProposal null for pure advice or while asking a blocking question.
 - Supported action JSON forms (inside plannerProposal.action):
   {"type":"move_session","sessionId":"existing-session-id","targetDate":"YYYY-MM-DD"}
   {"type":"adjust_activity","sessionId":"existing-session-id","activityId":"existing-activity-id","durationMinutes":45,"intensity":"Easy"}
   {"type":"replace_session","sessionId":"existing-session-id","title":"Easy aerobic run","reason":"...","activities":[{"activityType":"Run","durationMinutes":40,"intensity":"Easy","instructions":"...","purpose":"..."}]}
   {"type":"regenerate_rest_of_week","weekStarting":"YYYY-MM-DD"}
-- Full proposal shape: "plannerProposal":{"action":{...},"why":["..."],"evidence":["..."],"assumptions":["..."],"uncertainty":["..."],"tradeOffs":["..."],"expectedEffects":["..."],"alternativeConsidered":"..."}
+- Full proposal shape: "plannerProposal":{"action":{...},"recommendationType":"missed_workout","confidence":"high","impact":{"weeklyVolume":"...","recovery":"...","fitnessProgression":"...","goalProgression":"..."},"why":["..."],"evidence":["..."],"assumptions":["..."],"uncertainty":["..."],"tradeOffs":["..."],"expectedEffects":["..."],"alternativeConsidered":"..."}
 
 Memory behavior:
 - Return at most one memoryObservation, and only for a concrete, important personal detail. Do not extract secrets, credentials, highly sensitive details, or a temporary symptom as a lasting preference.
