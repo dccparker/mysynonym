@@ -9,6 +9,7 @@ import {
   loadConversationMessages,
   releaseConversation,
 } from "../../../lib/coach-conversations";
+import { loadCoachContext } from "../../../lib/coach-context";
 import { CoachModelError, generateCoachReply } from "../../../lib/coach-model";
 
 function jsonResponse(body: object, init?: ResponseInit) {
@@ -66,7 +67,7 @@ export async function POST(request: Request) {
     const authenticated = await authenticateCoachRequest(request);
     supabase = authenticated.supabase;
     const contentLength = Number(request.headers.get("content-length") ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 20_000) {
+    if (Number.isFinite(contentLength) && contentLength > 50_000) {
       throw new CoachRequestError("The request body is too large.", 413);
     }
 
@@ -109,8 +110,19 @@ export async function POST(request: Request) {
       role,
       content: text,
     }));
-    const reply = await generateCoachReply(promptMessages);
-    await addAssistantMessage(supabase, conversationId, reply);
+    const athleteContext = await loadCoachContext(
+      supabase,
+      authenticated.userId,
+      payload.planner ?? [],
+      payload.plannerToday,
+    );
+    const reply = await generateCoachReply(promptMessages, athleteContext);
+    await addAssistantMessage(
+      supabase,
+      conversationId,
+      reply.content,
+      reply.memoryObservation,
+    );
     await releaseConversation(supabase, conversationId);
     claimed = false;
 

@@ -1,5 +1,9 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { CoachConversation, CoachMessage } from "./coach-chat-types";
+import type {
+  CoachConversation,
+  CoachMemoryObservation,
+  CoachMessage,
+} from "./coach-chat-types";
 
 type ConversationRow = {
   id: string;
@@ -13,6 +17,7 @@ type MessageRow = {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  memory_observation?: CoachMemoryObservation | null;
 };
 
 export class CoachRequestError extends Error {
@@ -34,12 +39,15 @@ function toConversation(row: ConversationRow): CoachConversation {
   };
 }
 
-function toMessage(row: MessageRow): CoachMessage {
+function toMessage(row: MessageRow, memorySaved = false): CoachMessage {
   return {
     id: row.id,
     role: row.role,
     content: row.content,
     createdAt: row.created_at,
+    ...(row.memory_observation
+      ? { memoryObservation: row.memory_observation, memorySaved }
+      : {}),
   };
 }
 
@@ -88,13 +96,28 @@ export async function loadConversationMessages(
 ): Promise<CoachMessage[]> {
   const { data, error } = await supabase
     .from("coach_messages")
-    .select("id,role,content,created_at")
+    .select("id,role,content,created_at,memory_observation")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(200);
   if (error) throw new CoachRequestError("Messages could not be loaded.", 500);
-  return (data as MessageRow[]).reverse().map(toMessage);
+  const rows = (data as MessageRow[]).reverse();
+  const proposalIds = rows
+    .filter((row) => row.memory_observation)
+    .map((row) => row.id);
+  let savedMessageIds = new Set<string>();
+  if (proposalIds.length) {
+    const { data: savedMemories, error: memoryError } = await supabase
+      .from("coach_memories")
+      .select("source_message_id")
+      .in("source_message_id", proposalIds);
+    if (memoryError) throw new CoachRequestError("Saved Coach memories could not be loaded.", 500);
+    savedMessageIds = new Set(
+      savedMemories.map((memory) => memory.source_message_id as string),
+    );
+  }
+  return rows.map((row) => toMessage(row, savedMessageIds.has(row.id)));
 }
 
 export async function createConversation(
@@ -151,10 +174,16 @@ export async function addAssistantMessage(
   supabase: SupabaseClient,
   conversationId: string,
   content: string,
+  memoryObservation: CoachMemoryObservation | null,
 ): Promise<void> {
   const { error } = await supabase
     .from("coach_messages")
-    .insert({ conversation_id: conversationId, role: "assistant", content });
+    .insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content,
+      memory_observation: memoryObservation,
+    });
   if (error) throw new CoachRequestError("The Coach response could not be saved.", 500);
 }
 

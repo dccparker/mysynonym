@@ -2,9 +2,18 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { LoaderCircle, MessageCircle, Plus, Send } from "lucide-react";
+import { LoaderCircle, MessageCircle, Plus, Send, Trash2 } from "lucide-react";
 import { supabase } from "../lib/supabase";
-import type { CoachConversation, CoachMessage } from "../lib/coach-chat-types";
+import type {
+  CoachConversation,
+  CoachMessage,
+  SavedCoachMemory,
+} from "../lib/coach-chat-types";
+import {
+  localDateString,
+  normalizeTrainingPlan,
+  TRAINING_PLAN_STORAGE_KEY,
+} from "../lib/training-plan";
 
 type ApiResponse<T> = T & { error?: string };
 
@@ -13,6 +22,22 @@ class CoachApiError extends Error {
     super(message);
     this.name = "CoachApiError";
   }
+}
+
+function readCurrentPlanner() {
+  const storedPlan = window.localStorage.getItem(TRAINING_PLAN_STORAGE_KEY);
+  if (storedPlan === null) return [];
+  let parsedPlan: unknown;
+  try {
+    parsedPlan = JSON.parse(storedPlan);
+  } catch {
+    throw new Error("Your current planner could not be read. Review or refresh your training plan and try again.");
+  }
+  const planner = normalizeTrainingPlan(parsedPlan);
+  if (!planner) {
+    throw new Error("Your current planner has an invalid format. Review or refresh your training plan and try again.");
+  }
+  return planner;
 }
 
 async function requestCoach<T>(
@@ -52,11 +77,13 @@ export function CoachChat() {
   const [accessToken, setAccessToken] = useState("");
   const [isAuthLoaded, setIsAuthLoaded] = useState(false);
   const [conversations, setConversations] = useState<CoachConversation[]>([]);
+  const [memories, setMemories] = useState<SavedCoachMemory[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState("");
   const [messages, setMessages] = useState<CoachMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [memoryActionId, setMemoryActionId] = useState("");
   const [error, setError] = useState("");
   const pendingSend = useRef(false);
   const pendingMessageId = useRef("");
@@ -77,6 +104,20 @@ export function CoachChat() {
     } catch (loadError) {
       if (activeToken.current !== token) return;
       setError(loadError instanceof Error ? loadError.message : "Conversations could not be loaded.");
+    }
+  }, []);
+
+  const loadMemories = useCallback(async (token: string) => {
+    try {
+      const result = await requestCoach<{ memories: SavedCoachMemory[] }>(
+        token,
+        "/api/coach/memory",
+      );
+      if (activeToken.current !== token) return;
+      setMemories(result.memories);
+    } catch (loadError) {
+      if (activeToken.current !== token) return;
+      setError(loadError instanceof Error ? loadError.message : "Saved Coach memories could not be loaded.");
     }
   }, []);
 
@@ -123,10 +164,14 @@ export function CoachChat() {
       pendingSend.current = false;
       pendingMessageId.current = "";
       setConversations([]);
+      setMemories([]);
       setMessages([]);
       setSelectedConversationId("");
       setError("");
-      if (token) void loadConversations(token);
+      if (token) {
+        void loadConversations(token);
+        void loadMemories(token);
+      }
     };
 
     void supabase.auth.getSession().then(({ data, error: sessionError }) => {
@@ -143,7 +188,7 @@ export function CoachChat() {
       active = false;
       data.subscription.unsubscribe();
     };
-  }, [loadConversations]);
+  }, [loadConversations, loadMemories]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -160,6 +205,7 @@ export function CoachChat() {
     if (!pendingMessageId.current) pendingMessageId.current = window.crypto.randomUUID();
     const clientMessageId = pendingMessageId.current;
     try {
+      const planner = readCurrentPlanner();
       const result = await requestCoach<{
         conversationId: string;
         conversations: CoachConversation[];
@@ -170,6 +216,8 @@ export function CoachChat() {
           conversationId: selectedConversationId || undefined,
           clientMessageId,
           content,
+          planner,
+          plannerToday: localDateString(new Date()),
         }),
       });
         if (activeToken.current !== accessToken) return;
@@ -191,6 +239,67 @@ export function CoachChat() {
     } finally {
       pendingSend.current = false;
       setIsSending(false);
+    }
+  }
+
+  async function saveMemory(messageId: string) {
+    if (!accessToken || memoryActionId) return;
+    setMemoryActionId(messageId);
+    setError("");
+    try {
+      const result = await requestCoach<{ memory: SavedCoachMemory }>(
+        accessToken,
+        "/api/coach/memory",
+        {
+          method: "POST",
+          body: JSON.stringify({ messageId }),
+        },
+      );
+      if (activeToken.current !== accessToken) return;
+      setMemories((current) => [
+        result.memory,
+        ...current.filter((memory) => memory.id !== result.memory.id),
+      ]);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId ? { ...message, memorySaved: true } : message,
+        ),
+      );
+    } catch (saveError) {
+      if (activeToken.current !== accessToken) return;
+      setError(saveError instanceof Error ? saveError.message : "The Coach memory could not be saved.");
+    } finally {
+      setMemoryActionId("");
+    }
+  }
+
+  async function removeMemory(memory: SavedCoachMemory) {
+    if (!accessToken || memoryActionId) return;
+    setMemoryActionId(memory.id);
+    setError("");
+    try {
+      await requestCoach<{ deleted: boolean }>(
+        accessToken,
+        "/api/coach/memory",
+        {
+          method: "DELETE",
+          body: JSON.stringify({ memoryId: memory.id }),
+        },
+      );
+      if (activeToken.current !== accessToken) return;
+      setMemories((current) => current.filter((item) => item.id !== memory.id));
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === memory.sourceMessageId
+            ? { ...message, memorySaved: false }
+            : message,
+        ),
+      );
+    } catch (removeError) {
+      if (activeToken.current !== accessToken) return;
+      setError(removeError instanceof Error ? removeError.message : "The Coach memory could not be removed.");
+    } finally {
+      setMemoryActionId("");
     }
   }
 
@@ -233,7 +342,7 @@ export function CoachChat() {
                 Talk with your AI Coach
               </h2>
               <p className="mt-1 text-xs leading-relaxed text-[#9ba79f]">
-                Start a conversation or continue a previous one. Chat is not connected to your profile or training data yet.
+                Get advice informed by your athlete profile, training and recovery history, and current plan. This data is shared with the AI provider to answer you; the Coach cannot edit your plan.
               </p>
             </div>
           </div>
@@ -288,6 +397,43 @@ export function CoachChat() {
                   <p className="px-2 py-3 text-xs text-[#77837a]">No saved conversations yet.</p>
                 )}
               </div>
+              <section aria-labelledby="coach-memories-heading" className="mt-5 border-t border-white/[0.07] pt-4">
+                <h3 id="coach-memories-heading" className="px-2 text-xs font-semibold text-[#d6ded8]">
+                  Coach memory
+                </h3>
+                <p className="px-2 pt-1 text-[10px] leading-relaxed text-[#77837a]">
+                  Only details you explicitly save are used in future coaching.
+                </p>
+                {memories.length ? (
+                  <ul className="mt-2 space-y-2">
+                    {memories.map((memory) => (
+                      <li key={memory.id} className="rounded-lg bg-white/[0.04] p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-[9px] font-medium uppercase tracking-wide text-[#9ba79f]">
+                            {memory.category === "recurring_preference" ? "Preference" : "Profile detail"}
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Remove saved memory: ${memory.detail}`}
+                            disabled={Boolean(memoryActionId)}
+                            onClick={() => void removeMemory(memory)}
+                            className="shrink-0 rounded p-0.5 text-[#87938b] hover:text-red-300 disabled:opacity-50"
+                          >
+                            {memoryActionId === memory.id
+                              ? <LoaderCircle aria-hidden="true" className="animate-spin" size={12} />
+                              : <Trash2 aria-hidden="true" size={12} />}
+                          </button>
+                        </div>
+                        <p className="mt-1 break-words text-[11px] leading-relaxed text-[#c2cdc5]">
+                          {memory.detail}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="px-2 py-2 text-[10px] text-[#77837a]">No saved Coach memories.</p>
+                )}
+              </section>
             </aside>
 
             <div className="flex min-h-[28rem] min-w-0 flex-1 flex-col">
@@ -307,22 +453,64 @@ export function CoachChat() {
                       key={message.id}
                       className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
                     >
-                      <p
-                        className={`max-w-[90%] whitespace-pre-wrap break-words rounded-2xl px-4 py-3 text-sm leading-relaxed sm:max-w-[80%] ${
-                          message.role === "user"
-                            ? "rounded-br-md bg-[#b8f36b] text-[#182014]"
-                            : "rounded-bl-md border border-white/[0.07] bg-[#171f1a] text-[#d6ded8]"
-                        }`}
-                      >
-                        {message.content}
-                      </p>
+                      <div className="max-w-[90%] sm:max-w-[80%]">
+                        <p
+                          className={`whitespace-pre-wrap break-words rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                            message.role === "user"
+                              ? "rounded-br-md bg-[#b8f36b] text-[#182014]"
+                              : "rounded-bl-md border border-white/[0.07] bg-[#171f1a] text-[#d6ded8]"
+                          }`}
+                        >
+                          {message.content}
+                        </p>
+                        {message.role === "assistant" && message.memoryObservation && (
+                          <div className="mt-2 rounded-xl border border-white/[0.08] bg-[#0b100e] p-3 text-xs">
+                            {message.memoryObservation.category === "temporary" ? (
+                              <>
+                                <p className="font-semibold text-[#a6b1a9]">Temporary information · not saved as Coach memory</p>
+                                <p className="mt-1 whitespace-pre-wrap break-words text-[#c2cdc5]">
+                                  {message.memoryObservation.detail}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="font-semibold text-[#d6ded8]">
+                                  {message.memorySaved
+                                    ? "Saved to Coach memory"
+                                    : "Would you like me to save this to your profile?"}
+                                </p>
+                                <p className="mt-1 whitespace-pre-wrap break-words text-[#a6b1a9]">
+                                  {message.memoryObservation.detail}
+                                </p>
+                                {!message.memorySaved && (
+                                  <>
+                                    <p className="mt-2 text-[10px] leading-relaxed text-[#77837a]">
+                                      This saves the exact detail as Coach memory for future conversations. It will not change your athlete profile fields.
+                                    </p>
+                                    <button
+                                      type="button"
+                                      disabled={Boolean(memoryActionId)}
+                                      onClick={() => void saveMemory(message.id)}
+                                      className="mt-3 rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#182014] disabled:opacity-50"
+                                    >
+                                      {memoryActionId === message.id
+                                        ? "Saving…"
+                                        : "Save this detail"}
+                                    </button>
+                                  </>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ))
                 ) : (
                   <div className="mx-auto mt-10 max-w-md text-center">
                     <p className="text-sm font-medium text-[#d6ded8]">What would you like to talk about?</p>
                     <p className="mt-2 text-xs leading-relaxed text-[#8c9990]">
-                      This first version supports general conversation. It does not read your athlete profile, workout history, recovery data, or plan.
+                      Ask about your profile, progress, today&apos;s training, workout difficulty, or recovery trends.
                     </p>
                   </div>
                 )}
