@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { AuthCard, authButtonClass, authInputClass, FormMessage } from "../components/auth-card";
-import { friendlyAuthError, validatePassword } from "../lib/auth-messages";
+import { friendlyAuthError, PASSWORD_RECOVERY_FLAG, validatePassword } from "../lib/auth-messages";
 import { supabase } from "../lib/supabase";
 
 export default function ResetPasswordPage() {
@@ -18,6 +18,7 @@ export default function ResetPasswordPage() {
   useEffect(() => {
     // The recovery link signs the athlete in through the URL; give it a moment.
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      console.info("[password-reset] Auth event on /reset-password:", event, { hasSession: !!session });
       if (event === "PASSWORD_RECOVERY" || session) setReady("ready");
     });
     const timer = window.setTimeout(() => {
@@ -42,6 +43,8 @@ export default function ResetPasswordPage() {
         setError(friendlyAuthError(updateError, "signin"));
         return;
       }
+      window.sessionStorage.removeItem(PASSWORD_RECOVERY_FLAG);
+      console.info("[password-reset] Password updated.");
       setDone(true);
       window.setTimeout(() => router.replace("/"), 1500);
     } catch (failure) {
@@ -68,6 +71,17 @@ export default function ResetPasswordPage() {
           {error && <FormMessage kind="error">{error}</FormMessage>}
           <button className={authButtonClass} disabled={isSubmitting} type="submit">
             {isSubmitting ? "Saving…" : "Update password"}
+          </button>
+          <button
+            className="w-full text-xs font-medium text-[#8c9990] hover:text-[#e8eee9]"
+            onClick={async () => {
+              await supabase.auth.signOut();
+              window.sessionStorage.removeItem(PASSWORD_RECOVERY_FLAG);
+              router.replace("/login");
+            }}
+            type="button"
+          >
+            Cancel and sign out
           </button>
         </form>
       )}

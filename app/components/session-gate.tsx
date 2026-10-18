@@ -3,6 +3,7 @@
 import { LoaderCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
+import { PASSWORD_RECOVERY_FLAG } from "../lib/auth-messages";
 import { clearLocalAthleteData, pushPlanIfChanged, syncTrainingPlan } from "../lib/plan-sync-service";
 import { supabase } from "../lib/supabase";
 import { TRAINING_PLAN_UPDATED_EVENT } from "../lib/workout-storage";
@@ -27,8 +28,18 @@ export function SessionGate({ children }: { children: ReactNode }) {
       }, 1500);
     };
 
+    const sendToPasswordReset = () => {
+      console.info("[password-reset] Recovery session outside /reset-password; redirecting.");
+      router.replace("/reset-password");
+    };
+
     const handleSession = (id: string | null) => {
       if (!active) return;
+      // A recovery link must end in a new password, never in the dashboard.
+      if (id && window.sessionStorage.getItem(PASSWORD_RECOVERY_FLAG)) {
+        sendToPasswordReset();
+        return;
+      }
       if (!id) {
         userId = null;
         clearLocalAthleteData();
@@ -43,7 +54,10 @@ export function SessionGate({ children }: { children: ReactNode }) {
 
     void supabase.auth.getSession().then(({ data }) => handleSession(data.session?.user.id ?? null));
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === "SIGNED_OUT") queueMicrotask(() => handleSession(null));
+      if (event === "PASSWORD_RECOVERY") {
+        window.sessionStorage.setItem(PASSWORD_RECOVERY_FLAG, "1");
+        queueMicrotask(sendToPasswordReset);
+      } else if (event === "SIGNED_OUT") queueMicrotask(() => handleSession(null));
       else if (session) queueMicrotask(() => handleSession(session.user.id));
     });
 

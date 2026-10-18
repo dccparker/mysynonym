@@ -1,3 +1,4 @@
+import { PASSWORD_RECOVERY_FLAG } from "./auth-messages";
 import {
   decidePlanSync,
   hashPlan,
@@ -23,6 +24,7 @@ export function clearLocalAthleteData(): void {
   [TRAINING_PLAN_STORAGE_KEY, PLAN_OWNER_KEY, PLAN_SYNCED_HASH_KEY, ACTIVE_CONVERSATION_KEY].forEach((key) =>
     window.localStorage.removeItem(key),
   );
+  window.sessionStorage.removeItem(PASSWORD_RECOVERY_FLAG);
 }
 
 async function pushPlan(userId: string, local: string): Promise<boolean> {
