@@ -150,7 +150,7 @@ function parseProposal(value: unknown): CoachPlannerProposal {
     !Array.isArray(value.expectedEffects) ||
     [value.assumptions, value.tradeOffs, value.expectedEffects].some(
       (items) =>
-        items.length > 5 ||
+        items.length > 12 ||
         items.some(
           (item) =>
             typeof item !== "string" ||

@@ -28,11 +28,11 @@ type NavigationItem = {
 
 const navigation: NavigationItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
+  { label: "AI Coach", href: "/coach", icon: Sparkles },
   { label: "Training", href: "/training", icon: Dumbbell },
   { label: "History", href: "/history", icon: History },
   { label: "Recovery", href: "/recovery", icon: HeartPulse },
   { label: "Nutrition", href: "/nutrition", icon: Utensils },
-  { label: "AI Coach", href: "/coach", icon: Sparkles },
   { label: "Settings", href: "/settings", icon: Settings2 },
 ];
 

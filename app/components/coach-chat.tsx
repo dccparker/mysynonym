@@ -10,6 +10,7 @@ import type {
   SavedCoachMemory,
   SavedCoachPlannerAction,
 } from "../lib/coach-chat-types";
+import { splitProposalDetails } from "../lib/coach-chat-types";
 import {
   applyCoachPlannerAction,
   localDateString,
@@ -23,6 +24,25 @@ import {
   loadWorkoutHistory,
   notifyTrainingPlanUpdated,
 } from "../lib/workout-storage";
+
+const ACTIVE_CONVERSATION_KEY = "mysynonym-coach-active-conversation";
+
+function readStoredConversationId() {
+  try {
+    return window.localStorage.getItem(ACTIVE_CONVERSATION_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeConversationId(conversationId: string) {
+  try {
+    if (conversationId) window.localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+    else window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+  } catch {
+    // Persistence is best-effort.
+  }
+}
 
 type ApiResponse<T> = T & { error?: string };
 
@@ -118,33 +138,32 @@ function PlannerProposalCard({
   onApprove: () => void;
   onDismiss: () => void;
 }) {
+  const [showMore, setShowMore] = useState(false);
   const proposal = message.plannerProposal;
   if (!proposal) return null;
+  const details = splitProposalDetails(proposal);
   const diff = action ? diffPlans(action.beforePlan, action.afterPlan) : null;
   const statusLabel: Record<string, string> = {
     approved: "Approved · applying",
     applied: "Applied to your planner",
     stale: "Out of date · your planner changed",
-    rejected: "Dismissed",
+    rejected: "Rejected · planner unchanged",
   };
+  const sections = [
+    ["Evidence used", details.evidence],
+    ["Assumptions", details.assumptions],
+    ["Trade-offs", details.tradeOffs],
+    ["Expected downstream effects", details.expectedEffects],
+    ["Uncertainty", details.uncertainty],
+    ["Main alternative considered", details.alternatives],
+  ] as const;
+  const hasMore = sections.some(([, items]) => items.length > 0);
   return (
     <div className="mt-2 rounded-xl border border-[#b8f36b]/25 bg-[#0b100e] p-3 text-xs text-[#c2cdc5]">
-      <p className="font-semibold text-[#d6ded8]">Proposed planner change</p>
-      <p className="mt-1 whitespace-pre-wrap break-words">{proposal.rationale}</p>
-      {([
-        ["Assumptions", proposal.assumptions],
-        ["Trade-offs", proposal.tradeOffs],
-        ["Expected downstream effects", proposal.expectedEffects],
-      ] as const).map(([label, items]) =>
-        items.length ? (
-          <div key={label} className="mt-2">
-            <p className="font-semibold text-[#a6b1a9]">{label}</p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-4">
-              {items.map((item, index) => <li key={index}>{item}</li>)}
-            </ul>
-          </div>
-        ) : null,
-      )}
+      <p className="font-semibold text-[#d6ded8]">Why</p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4">
+        {details.why.map((line, index) => <li key={index} className="break-words">{line}</li>)}
+      </ul>
       {diff && (
         <div className="mt-3 space-y-1 rounded-lg border border-white/[0.08] p-2">
           <p className="font-semibold text-[#a6b1a9]">Before → after</p>
@@ -169,31 +188,53 @@ function PlannerProposalCard({
           </p>
         </div>
       )}
+      {showMore && sections.map(([label, items]) =>
+        items.length ? (
+          <div key={label} className="mt-2">
+            <p className="font-semibold text-[#a6b1a9]">{label}</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {items.map((item, index) => <li key={index} className="break-words">{item}</li>)}
+            </ul>
+          </div>
+        ) : null,
+      )}
       {error && <p role="alert" className="mt-2 text-red-200">{error}</p>}
       {!action && !error && <p className="mt-2 text-[#8c9990]">Preparing preview…</p>}
       {action && statusLabel[action.status] && (
         <p className="mt-2 font-semibold text-[#a6b1a9]">{statusLabel[action.status]}</p>
       )}
-      {action?.status === "pending" && (
-        <div className="mt-3 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
+        {action?.status === "pending" && (
+          <>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onApprove}
+              className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#182014] disabled:opacity-50"
+            >
+              {busy ? "Working…" : "Approve"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onDismiss}
+              className="rounded-lg border border-white/[0.12] px-3 py-2 text-xs font-semibold text-[#d6ded8] disabled:opacity-50"
+            >
+              Reject
+            </button>
+          </>
+        )}
+        {hasMore && (
           <button
             type="button"
-            disabled={busy}
-            onClick={onApprove}
-            className="rounded-lg bg-[#b8f36b] px-3 py-2 text-xs font-semibold text-[#182014] disabled:opacity-50"
+            aria-expanded={showMore}
+            onClick={() => setShowMore((current) => !current)}
+            className="rounded-lg px-3 py-2 text-xs font-semibold text-[#b8f36b] hover:underline"
           >
-            {busy ? "Working…" : "Approve and apply"}
+            {showMore ? "Show less" : "Explain More"}
           </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onDismiss}
-            className="rounded-lg border border-white/[0.12] px-3 py-2 text-xs font-semibold text-[#d6ded8] disabled:opacity-50"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -307,6 +348,11 @@ export function CoachChat() {
         activeConversation.current !== conversationId ||
         messageRequestId.current !== requestId
       ) return;
+      if (readStoredConversationId() === conversationId) {
+        storeConversationId("");
+        setSelectedConversationId("");
+        activeConversation.current = "";
+      }
       setError(loadError instanceof Error ? loadError.message : "This conversation could not be loaded.");
     } finally {
       if (messageRequestId.current === requestId) setIsLoading(false);
@@ -315,8 +361,10 @@ export function CoachChat() {
 
   useEffect(() => {
     let active = true;
-    const updateSession = (token: string) => {
+    const updateSession = (token: string, signedOut = false) => {
       if (!active) return;
+      if (signedOut || !token) storeConversationId("");
+      const restoredConversationId = token ? readStoredConversationId() : "";
       activeToken.current = token;
       activeConversation.current = "";
       messageRequestId.current += 1;
@@ -334,6 +382,10 @@ export function CoachChat() {
       if (token) {
         void loadConversations(token);
         void loadMemories(token);
+        if (restoredConversationId) {
+          setSelectedConversationId(restoredConversationId);
+          void loadMessages(token, restoredConversationId);
+        }
       }
     };
 
@@ -344,14 +396,14 @@ export function CoachChat() {
         setError("Your sign-in status could not be checked. Please refresh and try again.");
       }
     });
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      updateSession(session?.access_token ?? "");
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      updateSession(session?.access_token ?? "", event === "SIGNED_OUT");
     });
     return () => {
       active = false;
       data.subscription.unsubscribe();
     };
-  }, [loadConversations, loadMemories]);
+  }, [loadConversations, loadMemories, loadMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -405,6 +457,7 @@ export function CoachChat() {
         activeConversation.current = result.conversationId;
         messageRequestId.current += 1;
         setSelectedConversationId(result.conversationId);
+        storeConversationId(result.conversationId);
       setConversations(result.conversations);
       setMessages(result.messages);
       setDraft("");
@@ -414,6 +467,7 @@ export function CoachChat() {
       if (sendError instanceof CoachApiError && sendError.conversationId) {
         activeConversation.current = sendError.conversationId;
         setSelectedConversationId(sendError.conversationId);
+        storeConversationId(sendError.conversationId);
       }
       setError(sendError instanceof Error ? sendError.message : "The Coach could not respond.");
       await loadConversations(accessToken);
@@ -601,6 +655,7 @@ export function CoachChat() {
     activeConversation.current = "";
     messageRequestId.current += 1;
     setSelectedConversationId("");
+    storeConversationId("");
     setIsLoading(false);
     setMessages([]);
     setDraft("");
@@ -612,6 +667,7 @@ export function CoachChat() {
     if (isSending || !accessToken) return;
     activeConversation.current = conversationId;
     setSelectedConversationId(conversationId);
+    storeConversationId(conversationId);
     void loadMessages(accessToken, conversationId);
   }
 

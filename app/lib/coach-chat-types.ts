@@ -83,3 +83,39 @@ export type SavedCoachPlannerAction = CoachPlannerProposal & {
   approvedAt?: string;
   appliedAt?: string;
 };
+
+// Extra proposal detail is stored as prefixed lines in the existing
+// rationale/assumptions columns, so no schema change is required.
+export const PROPOSAL_DETAIL_PREFIXES = {
+  evidence: "Evidence: ",
+  uncertainty: "Uncertainty: ",
+  alternative: "Alternative considered: ",
+} as const;
+
+export function splitProposalDetails(proposal: CoachPlannerProposal) {
+  const details = {
+    why: proposal.rationale
+      .split("\n")
+      .map((line) => line.replace(/^[-•*]\s*/, "").trim())
+      .filter(Boolean)
+      .slice(0, 3),
+    evidence: [] as string[],
+    assumptions: [] as string[],
+    uncertainty: [] as string[],
+    alternatives: [] as string[],
+    tradeOffs: proposal.tradeOffs,
+    expectedEffects: proposal.expectedEffects,
+  };
+  for (const line of proposal.assumptions) {
+    if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.evidence)) {
+      details.evidence.push(line.slice(PROPOSAL_DETAIL_PREFIXES.evidence.length));
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.uncertainty)) {
+      details.uncertainty.push(line.slice(PROPOSAL_DETAIL_PREFIXES.uncertainty.length));
+    } else if (line.startsWith(PROPOSAL_DETAIL_PREFIXES.alternative)) {
+      details.alternatives.push(line.slice(PROPOSAL_DETAIL_PREFIXES.alternative.length));
+    } else {
+      details.assumptions.push(line);
+    }
+  }
+  return details;
+}

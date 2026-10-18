@@ -106,9 +106,11 @@ export async function POST(request: Request) {
     await addUserMessage(supabase, conversationId, clientMessageId, content);
 
     const transcript = await loadConversationMessages(supabase, conversationId);
-    const promptMessages = transcript.slice(-30).map(({ role, content: text }) => ({
-      role,
-      content: text,
+    const promptMessages = transcript.slice(-30).map((message) => ({
+      role: message.role,
+      content: message.plannerProposal
+        ? `${message.content}\n\n[App note: a planner proposal card with Approve, Reject and Explain More buttons was shown with this message (status: ${message.plannerAction?.status ?? "pending"}). The athlete approves with the button, not by chat.]`
+        : message.content,
     }));
     const athleteContext = await loadCoachContext(
       supabase,
