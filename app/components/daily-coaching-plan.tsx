@@ -166,9 +166,17 @@ export function DailyCoachingPlan() {
         <h2 className="mt-1 text-xl font-semibold text-white">{briefing.greeting}</h2>
         <p className="mt-3 text-sm text-white/75">{briefing.message}</p>
         <BulletList items={briefing.missingData} />
-        <Link href="/coach" className="mt-4 inline-flex rounded-lg bg-[#b8f36b] px-4 py-2 text-sm font-semibold text-black">
-          Ask Coach
-        </Link>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Link
+            href={briefing.missingData.includes("Athlete profile") ? "/settings" : "/training"}
+            className="inline-flex rounded-lg bg-[#b8f36b] px-4 py-2 text-sm font-semibold text-black"
+          >
+            {briefing.missingData.includes("Athlete profile") ? "Complete your profile" : "Build your training plan"}
+          </Link>
+          <Link href="/coach" className="inline-flex rounded-lg border border-white/15 px-4 py-2 text-sm font-semibold text-white">
+            Ask Coach
+          </Link>
+        </div>
       </section>
     );
   }

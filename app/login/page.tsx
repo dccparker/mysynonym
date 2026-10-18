@@ -4,7 +4,14 @@ import { ArrowRight, LoaderCircle, LockKeyhole, Mail } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import {
+  friendlyAuthError,
+  SIGNED_OUT_FLAG,
+  isObfuscatedDuplicateSignup,
+  isUnconfirmedEmail,
+  validatePassword,
+} from "../lib/auth-messages";
 import { supabase } from "../lib/supabase";
 
 type AuthMode = "signin" | "signup";
@@ -16,11 +23,55 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [canResend, setCanResend] = useState(false);
+
+  const [toast, setToast] = useState("");
+
+  useEffect(() => {
+    if (window.sessionStorage.getItem(SIGNED_OUT_FLAG)) {
+      window.sessionStorage.removeItem(SIGNED_OUT_FLAG);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setToast("You've been signed out.");
+      const timer = window.setTimeout(() => setToast(""), 5000);
+      return () => window.clearTimeout(timer);
+    }
+  }, []);
+
+  useEffect(() => {
+    void supabase.auth.getSession().then(({ data }) => {
+      if (data.session) router.replace("/");
+    });
+  }, [router]);
+
+  async function handleResend() {
+    setError("");
+    setNotice("");
+    const { error: resendError } = await supabase.auth.resend({
+      type: "signup",
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    if (resendError) setError(friendlyAuthError(resendError, "signin"));
+    else setNotice("Confirmation email sent. Check your inbox (and spam folder).");
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setNotice("");
+    setCanResend(false);
+    const trimmedEmail = email.trim();
+    if (!/^\S+@\S+\.\S+$/.test(trimmedEmail)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    if (mode === "signup") {
+      const passwordProblem = validatePassword(password);
+      if (passwordProblem) {
+        setError(passwordProblem);
+        return;
+      }
+    }
     setIsSubmitting(true);
 
     try {
@@ -33,10 +84,16 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
           : await supabase.auth.signUp({
               email: email.trim(),
               password,
+              options: { emailRedirectTo: window.location.origin },
             });
 
       if (result.error) {
-        setError(result.error.message);
+        setError(friendlyAuthError(result.error, mode));
+        setCanResend(isUnconfirmedEmail(result.error));
+        return;
+      }
+      if (mode === "signup" && isObfuscatedDuplicateSignup(result.data.user)) {
+        setError("An account with this email already exists. Sign in instead.");
         return;
       }
 
@@ -71,6 +128,14 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         className="pointer-events-none absolute -bottom-64 -right-40 size-[34rem] rounded-full bg-[#b8f36b]/[0.04] blur-3xl"
       />
 
+      {toast && (
+        <div
+          className="fixed left-1/2 top-5 z-50 -translate-x-1/2 rounded-lg border border-[#b8f36b]/30 bg-[#111714] px-4 py-3 text-sm text-[#d5edb5] shadow-xl shadow-black/40"
+          role="status"
+        >
+          {toast}
+        </div>
+      )}
       <section className="relative w-full max-w-[440px]">
         <Link
           aria-label="MySynonym home"
@@ -139,10 +204,14 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 >
                   Password
                 </label>
-                {isSignUp && (
+                {isSignUp ? (
                   <span className="text-[10px] text-[#77847b]">
                     At least 8 characters
                   </span>
+                ) : (
+                  <Link className="text-[11px] font-medium text-[#c2f680] hover:text-[#d8ff9b]" href="/forgot-password">
+                    Forgot password?
+                  </Link>
                 )}
               </div>
               <div className="relative">
@@ -172,6 +241,15 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               >
                 {error}
               </p>
+            )}
+            {canResend && (
+              <button
+                className="text-xs font-semibold text-[#c2f680] hover:text-[#d8ff9b]"
+                onClick={handleResend}
+                type="button"
+              >
+                Resend confirmation email
+              </button>
             )}
             {notice && (
               <p

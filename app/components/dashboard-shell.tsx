@@ -18,7 +18,13 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { calculateAge, formatTargetEvent, useAthleteProfile } from "../lib/athlete-profile";
+import { SIGNED_OUT_FLAG } from "../lib/auth-messages";
+import { clearLocalAthleteData, pushPlanIfChanged } from "../lib/plan-sync-service";
 import { supabase } from "../lib/supabase";
+import { ProfileMenu } from "./profile-menu";
+import { SessionGate } from "./session-gate";
+
+const PUBLIC_ROUTES = ["/login", "/signup", "/forgot-password", "/reset-password"];
 
 type NavigationItem = {
   label: string;
@@ -178,7 +184,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState("");
 
-  if (pathname === "/login" || pathname === "/signup") {
+  if (PUBLIC_ROUTES.includes(pathname)) {
     return children;
   }
 
@@ -187,6 +193,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
     setSignOutError("");
 
     try {
+      // Back up any unsaved plan changes while still authenticated.
+      const { data: current } = await supabase.auth.getUser();
+      if (current.user) await pushPlanIfChanged(current.user.id);
       const { error } = await supabase.auth.signOut();
 
       if (error) {
@@ -194,6 +203,8 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         return;
       }
 
+      clearLocalAthleteData();
+      window.sessionStorage.setItem(SIGNED_OUT_FLAG, "1");
       router.replace("/login");
       router.refresh();
     } catch (signOutFailure) {
@@ -215,6 +226,13 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         signOutError={signOutError}
       />
       <div className="min-w-0 flex-1">
+        <div className="hidden items-center justify-end border-b border-white/[0.07] bg-[#0b100e]/95 px-9 py-2.5 lg:flex">
+          <ProfileMenu
+            isSigningOut={isSigningOut}
+            onSignOut={handleSignOut}
+            signOutError={signOutError}
+          />
+        </div>
         <header className="border-b border-white/[0.07] bg-[#0b100e]/95 px-4 py-3 lg:hidden">
           <div className="flex items-center justify-between gap-4">
             <Brand />
@@ -226,27 +244,18 @@ export function DashboardShell({ children }: { children: ReactNode }) {
               >
                 <Bell size={16} />
               </button>
-              <button
-                aria-label="Sign out"
-                className="flex size-9 items-center justify-center rounded-lg border border-white/[0.08] text-[#aab5ad] transition-colors hover:border-white/[0.16] hover:text-[#e8eee9] disabled:cursor-wait disabled:opacity-60"
-                disabled={isSigningOut}
-                onClick={handleSignOut}
-                type="button"
-              >
-                <LogOut aria-hidden="true" size={16} />
-              </button>
+              <ProfileMenu
+                isSigningOut={isSigningOut}
+                onSignOut={handleSignOut}
+                signOutError={signOutError}
+              />
             </div>
           </div>
           <div className="mt-3 overflow-x-auto pb-0.5 [scrollbar-width:none]">
             <NavigationLinks mobile />
           </div>
-          {signOutError && (
-            <p className="mt-2 text-xs leading-5 text-red-300" role="alert">
-              {signOutError}
-            </p>
-          )}
         </header>
-        {children}
+        <SessionGate>{children}</SessionGate>
       </div>
     </main>
   );

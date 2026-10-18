@@ -37,6 +37,11 @@ export const PLANNER_STORAGE_REQUIREMENTS = [
     migration: "20261022000000_athlete_intelligence_memories.sql",
   },
   {
+    table: "training_plans",
+    columns: "user_id,plan,updated_at",
+    migration: "20261023000000_create_training_plans.sql",
+  },
+  {
     table: "daily_plan_approvals",
     columns: "id,user_id,plan_date,session_id,workout_summary,briefing,approved_at",
     migration: "20261021000000_create_daily_plan_approvals.sql",

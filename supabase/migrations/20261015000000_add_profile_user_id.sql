@@ -1,3 +1,9 @@
+-- Fresh databases have no profiles table; existing ones are unaffected.
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS user_id uuid,
   ADD COLUMN IF NOT EXISTS profile_data jsonb NOT NULL DEFAULT '{}'::jsonb;
